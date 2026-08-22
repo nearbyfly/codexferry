@@ -391,11 +391,25 @@ around.
      --exclude-dir=target --exclude-dir=.git .
    ```
 
-   Expected: empty. Because `docs/superpowers/` is not imported (decision 6),
-   this gate needs no path exception — every match is real work. Note the
-   `--exclude-dir` form matters: a `| grep -v '^./some/path'` pipe would silently
-   filter nothing, since `grep -r .` emits paths without a `./` prefix, and the
-   gate would pass vacuously.
+   Expected: the only matches are references to the old **repo** (`codex-router-rs`)
+   and the old design doc's filename — the provenance notes in `AGENTS.md` and
+   `ARCHITECTURE.md`, plus this spec itself. Zero occurrences of the product
+   brand. Note the `--exclude-dir` form matters: a `| grep -v '^./some/path'`
+   pipe would silently filter nothing, since `grep -r .` emits paths without a
+   `./` prefix, and the gate would pass vacuously.
+
+   **As implemented (2026-08-22):** the gate settles at 4 matches — `AGENTS.md`
+   ×3 and `ARCHITECTURE.md` ×1, all of the form `codex-router-rs` or the old
+   design-doc filename. Verify with:
+
+   ```
+   grep -rn "codex-router\|codex_router\|CODEX_ROUTER_" \
+     --exclude-dir=target --exclude-dir=.git . \
+     | grep -v "2026-08-22-codexferry-migration-design.md" \
+     | grep -v "codex-router-rs" | grep -v "2026-08-13-codex-router-design.md"
+   ```
+
+   Expected: empty.
 
    On the old repo, restricted to the imported paths, this returns **84 matching
    lines across 17 files** — the exact work list for layers 1–2. (Line counts,
@@ -453,6 +467,81 @@ around.
 7. **doctor:** `codexferry doctor --config config.toml` passes offline, and
    `doctor --live` passes, confirming the Codex ↔ codexferry contract survived
    the catalog-filename change.
+
+## Implementation outcome (2026-08-22)
+
+Executed as five commits on `main`, on top of the two spec commits:
+
+| Commit | Layer |
+|---|---|
+| `4a61cb0` | verbatim import at a5d1956 |
+| `58d64d6` | layer 1 — brand identity |
+| `d86311b` | layer 2a — env vars |
+| `11cac39` | layer 2c — catalog default |
+| `beecbcf` | layer 2b + doc sync |
+
+**All gates green.** Build clean; **309 passed + 1 ignored across 7 targets**
+(269/5/9/9/7/8/3), unchanged at every commit; grep gate empty; layer 3
+preservation gate 16/4/87/8 exact. `doctor` offline: 5/5 with 7 routes and
+"catalog regenerates identically". `scripts/e2e.sh`: all four scenarios
+(basic, models, tools, multiturn incl. mid-session model switch) pass against
+the real Codex CLI.
+
+**Behavior freeze proven mechanically.** With the rename tokens normalized away,
+every file in `src/`, `tests/`, and `scripts/` is byte-identical to the source:
+
+```
+for f in $(find src tests scripts -type f); do
+  diff <(sed 's/codexferry/@@/g; s/CODEXFERRY_/@@_/g' "$f") \
+       <(sed 's/codex-router/@@/g; s/codex_router/@@/g; s/CODEX_ROUTER_/@@_/g' \
+         "/home/niefei/pilot/codex-router-rs/$f") >/dev/null || echo "DIFFERS: $f"
+done
+```
+
+Output is empty — nothing but the intended renames changed.
+
+### Things that went wrong, and what they imply
+
+1. **`config.toml.example` was missed by layers 1 and 2a.** It is tracked, but
+   both layers' file globs listed `config.toml` explicitly and never picked up
+   the `.example`. Caught only by the full-repo grep gate, which is the argument
+   for running that gate over the *whole* tree rather than a curated path list.
+2. **`config.toml` lost the `suanli` provider mid-migration.** A `config.toml.bk`
+   appeared in the working tree that no migration step created, and `config.toml`
+   was rewritten one minute later minus `[providers.suanli]` and its route —
+   dropping the daemon from 7 routes to 6. Restored from that `.bk`, which was
+   itself already correctly renamed. **This is why the `doctor` route count is a
+   gate and not a formality**: a silent config regression is invisible to
+   `cargo test` (every test builds its own tempdir config) and invisible to the
+   grep gate. Only the route count caught it.
+3. **My own first counting command was wrong** and reported 297 passed when the
+   real figure was 309 — positional `awk` fields misparse the
+   `8 passed; 0 failed; 1 ignored` line. Replaced with a token-based sum. A gate
+   that can silently miscount is worse than no gate.
+4. **The README's two Codex-provider blocks disagreed** (`model_providers.router`
+   vs the canonical form) — pre-existing drift, resolved to `codexferry` per §2b.
+5. **ARCHITECTURE.md's project tree** said `codexferry-rs/` after the mechanical
+   rename (this repo has no `-rs` suffix) and still advertised
+   `docs/superpowers/plans/`. Mechanical renames produce plausible-looking
+   falsehoods in prose; docs need reading, not just `sed`.
+
+### Environment changes applied outside the repo
+
+- `~/.codex/config.toml`: provider key `router` → `codexferry`, `name`,
+  `env_key` → `CODEXFERRY_DUMMY`, `model_catalog_json` →
+  `codexferry-catalog.json`. Backed up to
+  `~/.codex/config.toml.bak-pre-codexferry-20260822`.
+- `~/.codex/router-catalog.json` copied to `~/.codex/codexferry-catalog.json`;
+  the old file is left in place.
+- `/config.toml` added to `.gitignore` (it was untracked-but-not-ignored in the
+  old repo), so a stray `git add -A` cannot publish local provider choices.
+
+### Still open
+
+- §Open question 2 (squash the five commits) — left as five; unchanged.
+- §Open question 3 (`model_catalog_json` retention) — renamed, not dropped.
+- `scripts/e2e-real.sh` not run: it spends real tokens against live upstreams.
+- Nothing pushed to `origin`.
 
 ## Deferred (explicitly out of scope)
 
