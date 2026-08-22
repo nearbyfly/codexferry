@@ -1,0 +1,8 @@
+/target
+.worktrees/
+
+# The author's working config: copied into the repo root but never committed.
+# The committed template is `config.toml.example`. Ignored (rather than merely
+# untracked, as in the old repo) so a stray `git add -A` cannot publish local
+# provider choices.
+/config.toml

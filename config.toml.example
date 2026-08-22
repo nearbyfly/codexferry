@@ -1,0 +1,63 @@
+# codex-router configuration example
+# Copy to config.toml and adjust as needed (the path can be overridden with the CODEX_ROUTER_CONFIG env var).
+
+[server]
+# Bind address (localhost-only by default; this tool has no auth — do not expose it to the public internet)
+host = "127.0.0.1"
+# Bind port
+port = 8787
+
+[providers.deepseek]
+# Upstream base_url; must include the API version path (e.g. .../v1 — the proxy does not append /v1 for you)
+base_url = "https://api.deepseek.com/v1"
+# API key source, in priority order: api_key (plaintext) → api_key_env (env var name) → api_key_file (file path)
+api_key_env = "DEEPSEEK_API_KEY"
+# Upstream protocol: "chat" (Responses ↔ Chat conversion) or "responses" (verbatim passthrough)
+format = "chat"
+# Upstream request timeout (ms); default 120000 (120 s)
+timeout_ms = 120000
+# Static headers injected into every upstream request (optional)
+# extra_headers = { "X-Custom" = "value" }
+# Only for chat-format providers:
+#   extra_params — extra fields merged into every upstream request body (win on collision with the converted result)
+#   drop_params  — top-level fields stripped from the request body (e.g. for upstreams that reject `reasoning_effort`)
+# NOTE: `stream_options` (the include_usage request the router adds) is NOT protected by the managed-field check,
+# so it can be overridden via extra_params/drop_params, which affects the token counts in response.completed
+# — treat it as an explicit escape hatch.
+extra_params = { top_k = 50 }
+drop_params = []
+
+[providers.ark]
+base_url = "https://ark.cn-beijing.volces.com/api/v3"
+api_key_env = "ARK_API_KEY"
+format = "chat"
+
+[session]
+# Session idle retention time (hours); default 168 (7 days)
+ttl_hours = 168
+# Maximum number of cached sessions; beyond this, LRU eviction; default 256
+max_sessions = 256
+# Memory budget (MiB); beyond this, LRU eviction; default 512
+max_memory_mb = 512
+
+# Provider-quirk kill switches. All quirks are enabled by default;
+# list a name in disabled to turn it off (case-insensitive). Currently registered:
+#   glm_thinking — adds `thinking: {"type":"enabled"}` for GLM/Zhipu models (they suppress
+#                  auto-thinking under heavy agent system prompts and need it enabled explicitly)
+#   missing_done — treats a stream that ends without [DONE] but with a finish_reason as complete, not failed
+#   dsml_heal    — repairs leaked DeepSeek DSML tool-call markers in chat replies (both streaming and
+#                  one-shot paths restore leaked markers to structured tool_calls and strip them from visible text)
+#   think_tags   — splits leaked <think>…</think> markers into the reasoning channel instead of rendering
+#                  them as body text (also covers streaming and one-shot paths)
+[quirks]
+disabled = []
+
+# Route field reference:
+#   model                    — upstream model name (required)
+#   context_window           — context window advertised in the generated model catalog (default 1 Mi tokens)
+#   default_reasoning_effort — catalog default level + the only level offered by the Codex picker
+#                              (minimal|low|medium|high|xhigh; optional — omit for models without a reasoning level)
+[routes]
+"deepseek/deepseek-v4-pro"   = { model = "deepseek-reasoner", context_window = 131072, default_reasoning_effort = "high" }
+"deepseek/deepseek-v4-flash" = { model = "deepseek-chat" }
+"ark/glm-5.2"                = { model = "glm-5.2", default_reasoning_effort = "medium" }
