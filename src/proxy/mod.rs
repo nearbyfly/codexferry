@@ -71,15 +71,15 @@ use tokio_stream::wrappers::ReceiverStream;
 
 /// Whether request/response body tracing is enabled (spec §11).
 ///
-/// Controlled by `CODEX_ROUTER_TRACE_BODY=1`; meant for local debugging only
+/// Controlled by `CODEXFERRY_TRACE_BODY=1`; meant for local debugging only
 /// (request/response bodies may contain sensitive content).
 fn trace_body_enabled() -> bool {
-    std::env::var("CODEX_ROUTER_TRACE_BODY")
+    std::env::var("CODEXFERRY_TRACE_BODY")
         .map(|v| v == "1")
         .unwrap_or(false)
 }
 
-/// Log a body at debug level when CODEX_ROUTER_TRACE_BODY=1.
+/// Log a body at debug level when CODEXFERRY_TRACE_BODY=1.
 ///
 /// The raw bytes are rendered lossy to UTF-8; bodies are only ever logged for
 /// debugging, never in normal operation.
@@ -247,8 +247,8 @@ pub async fn run() -> anyhow::Result<()> {
     // Initialize tracing (log level controlled by RUST_LOG).
     logging::init();
 
-    // Config path from CODEX_ROUTER_CONFIG, defaulting to ./config.toml.
-    let config_path = std::env::var("CODEX_ROUTER_CONFIG").unwrap_or_else(|_| "config.toml".into());
+    // Config path from CODEXFERRY_CONFIG, defaulting to ./config.toml.
+    let config_path = std::env::var("CODEXFERRY_CONFIG").unwrap_or_else(|_| "config.toml".into());
     let config_path = std::path::PathBuf::from(&config_path);
 
     serve(&config_path, signal_shutdown()).await
@@ -494,7 +494,7 @@ async fn handle_metrics(State(state): State<Arc<AppState>>) -> Response {
 /// Main entry point for `POST /v1/responses` (and the `/responses` alias).
 ///
 /// Dispatch flow (spec §6):
-/// 1. Trace the raw request body when `CODEX_ROUTER_TRACE_BODY=1`.
+/// 1. Trace the raw request body when `CODEXFERRY_TRACE_BODY=1`.
 /// 2. Parse the JSON body; a parse failure is a 400 Responses error.
 /// 3. Look up the route by `model` (`provider/alias`); unknown models get a
 ///    400 with "no route for model".

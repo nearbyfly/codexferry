@@ -713,7 +713,7 @@ pub fn free_port() -> u16 {
 /// and in the returned URL, so the caller passes the same `free_port()`
 /// value for both. The router's stderr is redirected into a file inside
 /// the temp dir so `wait_for_healthz` can surface the startup log on
-/// failure; `CODEX_ROUTER_CONFIG` points the binary at the temp config.
+/// failure; `CODEXFERRY_CONFIG` points the binary at the temp config.
 pub fn start_router_with_config(config_text: &str, port: u16) -> (RouterGuard, String) {
     let dir = tempfile::tempdir().expect("tempdir");
     let config_path = dir.path().join("config.toml");
@@ -724,7 +724,7 @@ pub fn start_router_with_config(config_text: &str, port: u16) -> (RouterGuard, S
 
     let bin = env!("CARGO_BIN_EXE_codexferry");
     let child = std::process::Command::new(bin)
-        .env("CODEX_ROUTER_CONFIG", &config_path)
+        .env("CODEXFERRY_CONFIG", &config_path)
         .stdout(Stdio::null())
         .stderr(stderr)
         .spawn()

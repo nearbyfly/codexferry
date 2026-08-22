@@ -74,7 +74,7 @@ pub(super) async fn handle_chat_format(
     }
     let chat_req_json =
         serde_json::to_vec(&chat_body).expect("ChatRequest serialization cannot fail");
-    // Log the outbound body when CODEX_ROUTER_TRACE_BODY=1.
+    // Log the outbound body when CODEXFERRY_TRACE_BODY=1.
     trace_body("upstream request", &chat_req_json);
     let in_flight = InFlightGuard::new(state.metrics.clone(), &route.provider_name, &req.model);
     let upstream_started = std::time::Instant::now();
@@ -422,7 +422,7 @@ pub(super) async fn handle_chat_format(
                 );
             }
         };
-        // Log the response body when CODEX_ROUTER_TRACE_BODY=1, then parse.
+        // Log the response body when CODEXFERRY_TRACE_BODY=1, then parse.
         trace_body("upstream response", &resp_bytes);
         let mut chat_resp: ChatResponse = match serde_json::from_slice(&resp_bytes) {
             Ok(r) => r,

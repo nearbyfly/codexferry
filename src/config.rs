@@ -1,7 +1,7 @@
 //! TOML configuration types, validation rules, and hot-reload watcher.
 //!
 //! The config file (default `config.toml`, overridable via the
-//! `CODEX_ROUTER_CONFIG` env var) is a TOML document with five optional
+//! `CODEXFERRY_CONFIG` env var) is a TOML document with five optional
 //! sections, each mirrored by a struct below:
 //!
 //! * `[server]` — bind `host`/`port` ([`ServerConfig`]).

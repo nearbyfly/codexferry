@@ -20,9 +20,9 @@
 //!   crate's own modules (session hits/misses, streaming conversion, …).
 //! * `RUST_LOG=error codexferry` — only errors, regardless of crate.
 //!
-//! ## Body tracing: `CODEX_ROUTER_TRACE_BODY`
+//! ## Body tracing: `CODEXFERRY_TRACE_BODY`
 //!
-//! `CODEX_ROUTER_TRACE_BODY=1` is a separate opt-in switch checked in
+//! `CODEXFERRY_TRACE_BODY=1` is a separate opt-in switch checked in
 //! `proxy.rs` (spec §11): with it set (and the level at `debug`), the proxy
 //! logs raw request/response bodies via `proxy::trace_body`. It is
 //! independent of `RUST_LOG` because bodies are only dumped when the

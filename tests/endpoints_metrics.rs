@@ -314,7 +314,7 @@ format = "chat"
         let stderr = std::fs::File::create(&stderr_path).expect("create stderr log");
         let bin = env!("CARGO_BIN_EXE_codexferry");
         let child = std::process::Command::new(bin)
-            .env("CODEX_ROUTER_CONFIG", &config_path)
+            .env("CODEXFERRY_CONFIG", &config_path)
             .stdout(Stdio::null())
             .stderr(stderr)
             .spawn()
@@ -438,7 +438,7 @@ async fn doctor_live_probe_report_has_no_failures() {
     let bin = env!("CARGO_BIN_EXE_codexferry");
     let out = std::process::Command::new(bin)
         .args(["doctor", "--live", "--config", "config.toml"])
-        .env("CODEX_ROUTER_CONFIG", "config.toml")
+        .env("CODEXFERRY_CONFIG", "config.toml")
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);

@@ -87,7 +87,7 @@ enum Commands {
         #[arg(long)]
         out: PathBuf,
         /// Path to the router TOML config file (same format the server
-        /// loads from `CODEX_ROUTER_CONFIG`).
+        /// loads from `CODEXFERRY_CONFIG`).
         #[arg(long)]
         config: PathBuf,
         /// Optional explicit path to a Codex `models.json` template to
@@ -104,7 +104,7 @@ enum Commands {
     /// CLI through a temporary in-process router + mock upstream and asserts
     /// the normalized wire shape and a full tool round-trip.
     Doctor {
-        /// Path to the router TOML config (defaults to CODEX_ROUTER_CONFIG
+        /// Path to the router TOML config (defaults to CODEXFERRY_CONFIG
         /// or ./config.toml, same rule as the server).
         #[arg(long)]
         config: Option<PathBuf>,
@@ -155,7 +155,7 @@ async fn main() -> anyhow::Result<()> {
             live,
         }) => {
             let config_path = config.unwrap_or_else(|| {
-                std::env::var("CODEX_ROUTER_CONFIG")
+                std::env::var("CODEXFERRY_CONFIG")
                     .unwrap_or_else(|_| "config.toml".into())
                     .into()
             });

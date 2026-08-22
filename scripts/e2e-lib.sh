@@ -71,7 +71,7 @@ start_mock() { # $1 scenario, $2 record path — sets MOCK_PORT/MOCK_PID
 
 start_router() { # $1 config path — sets ROUTER_PORT/ROUTER_PID
   ROUTER_PORT=$(awk -F' = ' '/^port = / {print $2; exit}' "$1")
-  CODEX_ROUTER_CONFIG="$1" "$REPO_ROOT/target/debug/codexferry" \
+  CODEXFERRY_CONFIG="$1" "$REPO_ROOT/target/debug/codexferry" \
     >"$ARTIFACT_DIR/router.log" 2>&1 &
   ROUTER_PID=$!
   wait_healthz "http://127.0.0.1:$ROUTER_PORT"

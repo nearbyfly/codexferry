@@ -48,7 +48,7 @@ sed -E "s/^port[[:space:]]*=[[:space:]]*[0-9]+/port = $PORT/" "$REAL_CONFIG" > "
 
 # The lib's EXIT trap (installed at `source` time) already runs cleanup_procs
 # and prints the artifact dir; do not install a second trap here.
-CODEX_ROUTER_CONFIG="$ARTIFACT_DIR/config-real.toml" "$REPO_ROOT/target/debug/codexferry" \
+CODEXFERRY_CONFIG="$ARTIFACT_DIR/config-real.toml" "$REPO_ROOT/target/debug/codexferry" \
   >"$ARTIFACT_DIR/router.log" 2>&1 &
 ROUTER_PID=$!
 wait_healthz "http://127.0.0.1:$PORT"
