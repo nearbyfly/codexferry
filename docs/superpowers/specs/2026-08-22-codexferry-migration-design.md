@@ -38,6 +38,11 @@ are clear.
    (`normalize.rs` non-injective encoding, `doctor_live.rs` TOCTOU, issue #15
    leftovers) are explicitly **out of scope** and get their own specs against
    the new repo.
+6. **Import scope — code, tests, and the three top-level markdown docs.**
+   `docs/superpowers/` (23 historical spec/plan files) is **not** carried over;
+   the retained old repo keeps it readable. This makes goal 3 absolute, at the
+   cost of 114 dangling `spec §N` citations in source comments — see
+   §Consequence of dropping `docs/superpowers/`.
 
 ## Goals
 
@@ -47,10 +52,9 @@ are clear.
 2. **Behavior frozen, proven by test count:** `309 passed + 1 ignored = 310`,
    identical before and after — same targets, same per-target counts (see
    §Baseline).
-3. Zero occurrences of the brand name `codex-router` / `codex_router` /
-   `CODEX_ROUTER_` in code, config, scripts, and the three top-level docs.
-   Historical documents under `docs/superpowers/` are deliberately excluded —
-   see §Migration mechanics item 4 and §Open question 1.
+3. **Zero occurrences** of the brand name `codex-router` / `codex_router` /
+   `CODEX_ROUTER_` anywhere in the new repo — no exceptions, since the
+   historical documents that would have needed one are not imported (decision 6).
 4. Neutral technical vocabulary is **preserved**, not renamed (see §Layer 3).
 5. The author's live environment (`~/.codex/config.toml`) keeps working, updated
    in the same change.
@@ -92,20 +96,20 @@ It must remain ignored-not-removed, and it is one of the three
 Source scale: 14,877 lines across 38 `.rs` files in `src/`, plus 3,244 lines
 across 6 files in `tests/` (18,121 total).
 
-Rename surface, scanned 2026-08-22. Counted as **occurrences**, and split by
-whether historical `docs/superpowers/` documents are included — they are excluded
-from the grep gate per §Migration mechanics item 4, so the "code + top-level
-docs" column is the actual work:
+Rename surface, scanned 2026-08-22, counted as **occurrences**. Only the
+imported paths matter (decision 6); the `docs/superpowers/` column is shown just
+to reconcile against the brainstorming memory:
 
-| Token | Code + top-level docs | Incl. `docs/superpowers/` |
+| Token | Imported paths (the work) | `docs/superpowers/` only (dropped) |
 |---|---|---|
-| `codex-router` (brand) | 54 in 14 files | 98 in 26 files |
-| `CODEX_ROUTER_*` | 32 in 12 files | 43 in 17 files |
-| `codex_router` (crate name) | 8 in 3 files | 10 in 5 files |
+| `codex-router` (brand) | 54 in 14 files | 44 |
+| `CODEX_ROUTER_*` | 32 in 12 files | 11 |
+| `codex_router` (crate name) | 8 in 3 files | 2 |
+| **Total** | **94** | **57** |
 
-(The brainstorming memory recorded 102/44/10 — those figures included
-`docs/superpowers/` and counted slightly differently. The numbers above are
-re-measured at a5d1956 and are what the gates assert against.)
+(The brainstorming memory recorded 102/44/10; those figures spanned both columns
+and counted slightly differently. The left column is re-measured at a5d1956 and
+is what the gates assert against.)
 
 Only 3 distinct env vars exist: `CODEX_ROUTER_CONFIG`, `CODEX_ROUTER_DUMMY`,
 `CODEX_ROUTER_TRACE_BODY`.
@@ -266,26 +270,87 @@ occurrences) — `router` alone is not the brand name.
 ## Migration mechanics
 
 Fresh-start history (decision 3) means the new repo is not a `git clone`. The
-working tree is copied, `.git` excluded:
+working tree is copied selectively — **code, tests, and the three top-level
+markdown docs only** (decision 6):
 
-1. Copy the old working tree to `~/pilot/codexferry`, excluding `.git/`,
-   `target/`, `.worktrees/`.
-2. Carry `.gitignore` (`/target`, `.worktrees/`) unchanged.
-3. **Do not** carry `.claude/settings.local.json` — it contains stale
-   permission entries naming `target/release/codex-router` and one-off `curl`
-   allowances from the naming research. A fresh file is written with the
-   equivalent entries under the new binary name, or omitted entirely.
-4. `docs/superpowers/specs/` and `plans/` carry over. Two filenames contain the
-   old name (`2026-08-13-codex-router-design.md`,
-   `2026-08-13-codex-router.md`) — they are renamed via `git mv`-equivalent to
-   `…-codexferry-design.md` / `…-codexferry.md`.
-   **Historical spec/plan bodies are left textually intact**: they are dated
-   records of decisions made under the old name, and rewriting them would
-   falsify history. Goal 3 is scoped to exclude these historical documents; a
-   note at the top of each records the rename. *(This is the one deliberate
-   exception to "zero occurrences" — see §Open question 1.)*
-5. This spec, and the AGENTS.md `Spec:`/`Plan:` pointers, reference the renamed
-   filenames.
+**Carried over:**
+
+| Path | Notes |
+|---|---|
+| `src/` | 38 `.rs` files, 14,877 lines |
+| `tests/` | 6 `.rs` files, 3,244 lines |
+| `scripts/` | `e2e.sh`, `e2e-lib.sh`, `e2e-real.sh` |
+| `Cargo.toml`, `Cargo.lock` | both tracked in the old repo; `Cargo.lock` pins the verified dependency set |
+| `config.toml.example` | tracked — the committed template |
+| `README.md`, `AGENTS.md`, `ARCHITECTURE.md` | 1,204 lines total |
+| `.gitignore` | `/target`, `.worktrees/` |
+
+**`config.toml` is a special case.** In the old repo it is **untracked but not
+gitignored** — it is the author's working config, and the committed template is
+`config.toml.example`. It must be copied to the new repo but **must not be
+committed**.
+
+Who actually depends on the repo-root file is narrower than it looks: the unit
+and integration tests all build their own configs in tempdirs, so the only
+in-repo consumers are the ignored `doctor_live_probe_report_has_no_failures`
+test (`--config config.toml`, `tests/endpoints_metrics.rs:441`) and manual
+`doctor` / daemon runs from the repo root — i.e. §Verification steps 5 and 7,
+not steps 1–2. Two consequences for the implementation:
+
+- Never run `git add -A` / `git add .` during the migration; add explicit paths.
+  A blanket add would commit the author's live provider configuration.
+- Its content still needs the Layer 1/2a renames (`config.toml:2,4`) so the
+  running daemon picks up `CODEXFERRY_CONFIG` — an edit to an uncommitted file,
+  which the grep gate will still see (it greps the working tree, not the index).
+
+It contains no literal secrets — all five providers use `api_key_env`
+indirection — so the risk is leaking configuration shape and provider choices,
+not credentials. Consider adding `/config.toml` to `.gitignore` in the new repo
+to make the "don't commit this" rule mechanical rather than a matter of
+discipline.
+
+**Not carried over:**
+
+1. `.git/` — decision 3 (fresh history).
+2. `target/`, `.worktrees/` — build artifacts and scratch worktrees.
+3. `.claude/settings.local.json` — stale permission entries naming
+   `target/release/codex-router` plus one-off `curl` allowances from the naming
+   research. Write a fresh file under the new binary name, or omit entirely.
+4. **`docs/superpowers/` in its entirety** — 23 historical spec/plan files
+   (668KB). They are dated records of decisions made under the old name, and
+   the retained old repo keeps them readable. This makes goal 3 absolute: no
+   old-name text survives anywhere, and the grep gate needs no exception for
+   historical documents.
+
+### Consequence of dropping `docs/superpowers/`: 114 dangling `spec §N` citations
+
+Nothing references `docs/superpowers/` **by path** except two lines
+(`AGENTS.md:14-15`, the `Spec:`/`Plan:` pointers). But source comments cite the
+old design doc's section numbers — `spec §1` … `spec §14`, including
+sub-sections like `§7.3` and `§8.5` — in **114 places across 25 files**. Those
+numbers map exactly onto the dropped document's `## N.` headings, so after the
+migration they point at nothing in this repo.
+
+This is a real cost of decision 6, and the spec does **not** hide it. Options,
+in ascending order of effort:
+
+- **(a) Leave them, and add one orienting line to AGENTS.md** replacing the
+  `Spec:`/`Plan:` pointers — e.g. "`spec §N` in source comments refers to the
+  original design doc, retained in the `codex-router-rs` repo." One edit; the
+  114 citations keep their meaning for anyone who can reach the old repo.
+- **(b) Strip the `spec §N` references** from all 114 sites. Touches 25 files
+  for no behavior change, and destroys genuinely useful provenance.
+- **(c) Port the design doc** into this repo as a single reference document,
+  renamed. Contradicts decision 6.
+
+**Recommend (a).** It is a one-line edit, keeps provenance intact, and the
+comments are already written to be read alongside the code. Note (a) is also the
+only option that does not touch the frozen source — (b) would edit 25 files
+under a "behavior frozen" spec, which is exactly the kind of churn the test-count
+gate cannot validate.
+
+Flagged as §Open question 1 since it changes what a future reader of these
+comments can find.
 
 ### Commit sequence
 
@@ -295,15 +360,18 @@ initial commit is settled by §Open question 2.
 
 | # | Commit | Contents |
 |---|---|---|
-| 1 | `chore: import codex-router-rs working tree at a5d1956` | Verbatim copy, pre-rename. Establishes the diff base so layers 1–3 are reviewable. |
-| 2 | `refactor: rename brand identity to codexferry (layer 1)` | §Layer 1 table |
+| 1 | `chore: import codex-router-rs code and tests at a5d1956` | Verbatim copy of the carried-over paths, pre-rename. Establishes the diff base so layers 1–3 are reviewable. |
+| 2 | `refactor: rename brand identity to codexferry (layer 1)` | §Layer 1 table, incl. the three `CARGO_BIN_EXE` sites |
 | 3 | `refactor!: rename env vars to CODEXFERRY_* (layer 2a)` | §2a |
 | 4 | `refactor!: rename Codex provider key and catalog default (layer 2b/2c)` | §2b, §2c |
-| 5 | `docs: sync README/AGENTS/ARCHITECTURE and spec filenames` | doc updates, `docs/` renames |
+| 5 | `docs: sync README/AGENTS/ARCHITECTURE for the new name` | doc updates + the AGENTS.md `Spec:`/`Plan:` replacement line per option (a) |
 
 Commits 3 and 4 are marked `!` (breaking) even though nothing external depends
 on them yet — they change a documented interface, and the marker is what makes
 that legible if the project is later published.
+
+Note this spec commit (`9d2d47a`) already exists in the new repo and precedes
+commit 1, so history reads spec-then-import rather than the reverse.
 
 ## Verification
 
@@ -316,22 +384,23 @@ around.
    with the same per-target breakdown as §Baseline. A changed count means the
    rename touched behavior — the whole point of this gate.
 3. **Grep gate:** zero matches for `codex-router`, `codex_router`,
-   `CODEX_ROUTER_` outside `docs/superpowers/` (per §Migration mechanics item 4):
+   `CODEX_ROUTER_` anywhere in the repo:
 
    ```
    grep -rn "codex-router\|codex_router\|CODEX_ROUTER_" \
-     --include=*.rs --include=*.toml --include=*.sh --include=*.md \
-     --exclude-dir=target --exclude-dir=superpowers --exclude-dir=.git .
+     --exclude-dir=target --exclude-dir=.git .
    ```
 
-   Expected: empty. Use `--exclude-dir`, **not** a `| grep -v '^./docs/…'`
-   pipe: `grep -r .` emits paths without a `./` prefix, so an anchored `^./`
-   filter silently matches nothing and the gate would pass vacuously.
+   Expected: empty. Because `docs/superpowers/` is not imported (decision 6),
+   this gate needs no path exception — every match is real work. Note the
+   `--exclude-dir` form matters: a `| grep -v '^./some/path'` pipe would silently
+   filter nothing, since `grep -r .` emits paths without a `./` prefix, and the
+   gate would pass vacuously.
 
-   On the old repo this command returns **84 matching lines across 17 files** —
-   the exact work list for layers 1–2. (Line counts, not occurrence counts: a
-   line containing the name twice counts once, which is why these do not sum to
-   the 94 occurrences in §Baseline's first column.)
+   On the old repo, restricted to the imported paths, this returns **84 matching
+   lines across 17 files** — the exact work list for layers 1–2. (Line counts,
+   not occurrence counts: a line containing the name twice counts once, which is
+   why these do not sum to the 94 occurrences in §Baseline.)
 
    | File | Matches |
    |---|---|
@@ -406,11 +475,13 @@ the new repo:
 
 ## Open questions
 
-1. **Historical spec/plan bodies** — §Migration mechanics item 4 proposes leaving
-   old-name text intact inside `docs/superpowers/` as dated records, making goal 3
-   scoped rather than absolute. The alternative is rewriting them for a
-   uniformly clean repo at the cost of falsifying dated decisions. *Recommend
-   leaving intact.*
+1. **The 114 dangling `spec §N` citations** — dropping `docs/superpowers/`
+   (decision 6) leaves 114 source comments across 25 files citing section numbers
+   of a document no longer in this repo. Options (a) one orienting AGENTS.md line,
+   (b) strip all 114, (c) port the design doc, are laid out in
+   §Consequence of dropping `docs/superpowers/`. *Recommend (a)* — one edit,
+   preserves provenance, and the only option that leaves the frozen source
+   untouched.
 2. **Squash to one initial commit?** Decision 3 says the published repo starts
    fresh, and the §Commit sequence above gives 5 reviewable commits. These are
    compatible if commits 1–5 are squashed once verification passes, or if "fresh
