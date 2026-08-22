@@ -83,7 +83,7 @@ enum Commands {
     /// `catalog::run_gen_catalog` for the full algorithm.
     GenCatalog {
         /// Output path for the generated catalog JSON
-        /// (e.g. `~/.codex/router-catalog.json`).
+        /// (e.g. `~/.codex/codexferry-catalog.json`).
         #[arg(long)]
         out: PathBuf,
         /// Path to the router TOML config file (same format the server
@@ -109,7 +109,7 @@ enum Commands {
         #[arg(long)]
         config: Option<PathBuf>,
         /// Path to the installed catalog JSON
-        /// (defaults to ~/.codex/router-catalog.json).
+        /// (defaults to ~/.codex/codexferry-catalog.json).
         #[arg(long)]
         catalog: Option<PathBuf>,
         /// Optional explicit path to a Codex `models.json` template to

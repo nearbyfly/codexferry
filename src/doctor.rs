@@ -84,14 +84,14 @@ pub fn run_doctor(
     Ok(())
 }
 
-/// Default installed-catalog location: `$HOME/.codex/router-catalog.json`.
+/// Default installed-catalog location: `$HOME/.codex/codexferry-catalog.json`.
 fn default_catalog_path() -> PathBuf {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_default();
     PathBuf::from(home)
         .join(".codex")
-        .join("router-catalog.json")
+        .join("codexferry-catalog.json")
 }
 
 /// Offline checks: readability/shape, regenerate-and-compare, wiring hints.
@@ -254,7 +254,7 @@ format = "chat"
         setup(dir.path());
         let generated =
             crate::catalog::generate_catalog(&dir.path().join("config.toml"), None).unwrap();
-        let catalog_path = dir.path().join("router-catalog.json");
+        let catalog_path = dir.path().join("codexferry-catalog.json");
         std::fs::write(
             &catalog_path,
             serde_json::to_string_pretty(&generated.catalog).unwrap(),
@@ -272,7 +272,7 @@ format = "chat"
             .unwrap()
             .catalog;
         catalog["models"][0]["description"] = serde_json::json!("hand edited");
-        let catalog_path = dir.path().join("router-catalog.json");
+        let catalog_path = dir.path().join("codexferry-catalog.json");
         std::fs::write(
             &catalog_path,
             serde_json::to_string_pretty(&catalog).unwrap(),
@@ -305,7 +305,7 @@ format = "chat"
         std::fs::write(dir.path().join("config.toml"), "not toml [").unwrap();
         // A parseable catalog is needed so the early return happens on the
         // config-load failure, not on a missing-catalog failure.
-        let catalog_path = dir.path().join("router-catalog.json");
+        let catalog_path = dir.path().join("codexferry-catalog.json");
         std::fs::write(&catalog_path, r#"{"models": []}"#).unwrap();
         let checks = offline_checks(&dir.path().join("config.toml"), &catalog_path, None);
         assert!(report_has_fail(&checks));
