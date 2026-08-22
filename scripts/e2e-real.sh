@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # E2E (real layer): codex exec against real upstreams through a DEDICATED
 # router instance. Costs tokens: prompts are tiny, <= 3 turns per route.
-# Requires a debug build first: cargo build --quiet --bin codex-router.
+# Requires a debug build first: cargo build --quiet --bin codexferry.
 # Usage: E2E_REAL_ROUTES="glm/glm-4.7 deepseek/deepseek-v4-flash" \
 #        [E2E_REAL_CONFIG=path/to/config.toml] scripts/e2e-real.sh
 set -euo pipefail
@@ -37,9 +37,9 @@ metrics_success_count() { # $1 router port, $2 route
   fi
 }
 
-REAL_CONFIG="${E2E_REAL_CONFIG:-$HOME/.config/codex-router/config.toml}"
+REAL_CONFIG="${E2E_REAL_CONFIG:-$HOME/.config/codexferry/config.toml}"
 [ -f "$REAL_CONFIG" ] || fail "router config not found: $REAL_CONFIG"
-[ -x "$REPO_ROOT/target/debug/codex-router" ] || fail "build codex-router first: cargo build --quiet --bin codex-router"
+[ -x "$REPO_ROOT/target/debug/codexferry" ] || fail "build codexferry first: cargo build --quiet --bin codexferry"
 
 # The router has no --port override; derive a temp config with an ephemeral
 # port so the resident instance is never touched.
@@ -48,7 +48,7 @@ sed -E "s/^port[[:space:]]*=[[:space:]]*[0-9]+/port = $PORT/" "$REAL_CONFIG" > "
 
 # The lib's EXIT trap (installed at `source` time) already runs cleanup_procs
 # and prints the artifact dir; do not install a second trap here.
-CODEX_ROUTER_CONFIG="$ARTIFACT_DIR/config-real.toml" "$REPO_ROOT/target/debug/codex-router" \
+CODEX_ROUTER_CONFIG="$ARTIFACT_DIR/config-real.toml" "$REPO_ROOT/target/debug/codexferry" \
   >"$ARTIFACT_DIR/router.log" 2>&1 &
 ROUTER_PID=$!
 wait_healthz "http://127.0.0.1:$PORT"

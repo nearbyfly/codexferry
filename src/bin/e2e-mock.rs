@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 #[derive(Parser)]
-#[command(about = "Scripted mock upstream for codex-router E2E scripts")]
+#[command(about = "Scripted mock upstream for codexferry E2E scripts")]
 struct Args {
     /// Port to listen on.
     #[arg(long)]

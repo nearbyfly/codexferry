@@ -575,7 +575,7 @@ mod client_tests {
 
     #[test]
     fn resolve_key_from_file_trims() {
-        let dir = std::env::temp_dir().join(format!("codex_router_key_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("codexferry_key_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("key.txt");
         std::fs::write(&path, "  sk-from-file\n").unwrap();

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# E2E: real Codex CLI against codex-router over the scripted e2e-mock upstream.
+# E2E: real Codex CLI against codexferry over the scripted e2e-mock upstream.
 # Usage: scripts/e2e.sh [basic|models|tools|multiturn|all]   (default: all)
 # Requires: codex CLI on PATH, python3, curl. Never touches ~/.codex or the
 # resident router's config — the CLI's CODEX_HOME is redirected to the
@@ -173,7 +173,7 @@ scenario_multiturn() {
   pass "multiturn"
 }
 
-cargo build --quiet --bin codex-router --bin e2e-mock || fail "build failed"
+cargo build --quiet --bin codexferry --bin e2e-mock || fail "build failed"
 command -v codex >/dev/null || fail "codex CLI not on PATH"
 command -v python3 >/dev/null || fail "python3 required"
 command -v curl >/dev/null || fail "curl required"

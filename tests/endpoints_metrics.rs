@@ -312,13 +312,13 @@ format = "chat"
         std::fs::write(&config_path, &config_text).expect("write config");
 
         let stderr = std::fs::File::create(&stderr_path).expect("create stderr log");
-        let bin = env!("CARGO_BIN_EXE_codex-router");
+        let bin = env!("CARGO_BIN_EXE_codexferry");
         let child = std::process::Command::new(bin)
             .env("CODEX_ROUTER_CONFIG", &config_path)
             .stdout(Stdio::null())
             .stderr(stderr)
             .spawn()
-            .expect("spawn codex-router");
+            .expect("spawn codexferry");
 
         let guard = RouterGuard {
             child,
@@ -435,7 +435,7 @@ async fn doctor_live_probe_report_has_no_failures() {
     }
     // doctor --live prints its own report and exits 1 on failure; run the
     // binary the way a user would and require a clean exit.
-    let bin = env!("CARGO_BIN_EXE_codex-router");
+    let bin = env!("CARGO_BIN_EXE_codexferry");
     let out = std::process::Command::new(bin)
         .args(["doctor", "--live", "--config", "config.toml"])
         .env("CODEX_ROUTER_CONFIG", "config.toml")

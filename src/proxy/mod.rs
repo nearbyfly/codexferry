@@ -356,7 +356,7 @@ pub async fn serve(
     let host = validated.server.host.as_str();
     let port = validated.server.port;
     let listener = tokio::net::TcpListener::bind((host, port)).await?;
-    tracing::info!("codex-router listening on {host}:{port}");
+    tracing::info!("codexferry listening on {host}:{port}");
 
     // Serve until `shutdown` completes: stop accepting new connections, then
     // let in-flight streaming requests finish (spec §12).

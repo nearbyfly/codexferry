@@ -3,7 +3,7 @@
 # Sourced, not executed. Callers must `set -euo pipefail` themselves.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ARTIFACT_DIR="$(mktemp -d /tmp/codex-router-e2e.XXXXXX)"
+ARTIFACT_DIR="$(mktemp -d /tmp/codexferry-e2e.XXXXXX)"
 # EXIT trap: cleanup (safe when PIDs are unset/reaped — cleanup_procs guards
 # with :-) and then print the artifact dir. Callers that install their own
 # EXIT trap must re-include the print (Task 6 is pointed at this).
@@ -71,7 +71,7 @@ start_mock() { # $1 scenario, $2 record path — sets MOCK_PORT/MOCK_PID
 
 start_router() { # $1 config path — sets ROUTER_PORT/ROUTER_PID
   ROUTER_PORT=$(awk -F' = ' '/^port = / {print $2; exit}' "$1")
-  CODEX_ROUTER_CONFIG="$1" "$REPO_ROOT/target/debug/codex-router" \
+  CODEX_ROUTER_CONFIG="$1" "$REPO_ROOT/target/debug/codexferry" \
     >"$ARTIFACT_DIR/router.log" 2>&1 &
   ROUTER_PID=$!
   wait_healthz "http://127.0.0.1:$ROUTER_PORT"

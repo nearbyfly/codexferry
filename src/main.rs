@@ -1,4 +1,4 @@
-//! CLI entry point for `codex-router`.
+//! CLI entry point for `codexferry`.
 //!
 //! This crate is a local proxy daemon that lets Codex CLI use
 //! Chat-Completions-only LLM providers (DeepSeek, Kimi, GLM, SiliconFlow, …)
@@ -49,14 +49,14 @@ mod wire;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-/// Top-level command-line interface for the `codex-router` binary.
+/// Top-level command-line interface for the `codexferry` binary.
 ///
 /// Parsed by clap's derive macro. When no subcommand is given, `command` is
 /// `None` and the proxy server is started; otherwise the requested
 /// subcommands (`gen-catalog`, `doctor`) is dispatched to (see [`Commands`]).
 #[derive(Parser)]
 #[command(
-    name = "codex-router",
+    name = "codexferry",
     version,
     about = "Local proxy: Responses API ↔ Chat Completions, multi-provider routing"
 )]
@@ -67,7 +67,7 @@ struct Cli {
     command: Option<Commands>,
 }
 
-/// All subcommands for the `codex-router` CLI.
+/// All subcommands for the `codexferry` CLI.
 ///
 /// Currently has two variants: `gen-catalog`, which generates a Codex model
 /// catalog JSON file, and `doctor`, which checks router ↔ Codex contract

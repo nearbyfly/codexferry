@@ -21,7 +21,7 @@
 //!      API-key injection.
 //!   2. A temp `config.toml` points the router at the mock (`providers.mock`,
 //!      format = "chat", route `mock/chat`).
-//!   3. The router binary is spawned via `CARGO_BIN_EXE_codex-router`, polled
+//!   3. The router binary is spawned via `CARGO_BIN_EXE_codexferry`, polled
 //!      on `/healthz`, and killed on drop.
 //!
 //! `setup()` bundles all of the above into a `TestEnv` (router URL for
@@ -722,13 +722,13 @@ pub fn start_router_with_config(config_text: &str, port: u16) -> (RouterGuard, S
     let stderr_path = dir.path().join("router.stderr.log");
     let stderr = std::fs::File::create(&stderr_path).expect("create stderr log");
 
-    let bin = env!("CARGO_BIN_EXE_codex-router");
+    let bin = env!("CARGO_BIN_EXE_codexferry");
     let child = std::process::Command::new(bin)
         .env("CODEX_ROUTER_CONFIG", &config_path)
         .stdout(Stdio::null())
         .stderr(stderr)
         .spawn()
-        .expect("spawn codex-router");
+        .expect("spawn codexferry");
 
     (
         RouterGuard {
