@@ -1,6 +1,6 @@
 # Architecture
 
-Technical analysis of `codex-router` — a local proxy daemon that aggregates
+Technical analysis of `codexferry` — a local proxy daemon that aggregates
 multiple LLM providers under a unified `provider/model` namespace and translates
 between OpenAI Responses and Chat Completions APIs.
 
@@ -11,7 +11,7 @@ Codex CLI (≥0.128) custom providers only accept the Responses API
 GLM, SiliconFlow) only expose Chat Completions. Additionally, Codex TUI's model
 selector binds to a single provider — you cannot switch providers mid-session.
 
-`codex-router` solves both problems:
+`codexferry` solves both problems:
 1. **Protocol translation**: Responses ↔ Chat Completions (request + streaming SSE).
 2. **Model aggregation**: All providers' models are unified under `provider/alias`
    names. Codex configures one provider pointing at the proxy and switches models
@@ -66,7 +66,7 @@ is used. This gives precise control over:
                        │ POST /v1/responses (SSE)
                        ▼
 ┌─────────────────────────────────────────────────────────┐
-│                  codex-router (axum)                     │
+│                  codexferry (axum)                     │
 │                                                          │
 │  1. Parse model from body → lookup route                │
 │  2. Check previous_response_id → merge session history  │
@@ -321,7 +321,7 @@ Turn 2: codex -m ark/glm-5.2  (switch provider!)
 ## 11. Project Structure
 
 ```
-codex-router-rs/
+codexferry/
 ├── Cargo.toml
 ├── config.toml.example
 ├── AGENTS.md               # AI agent notes
@@ -332,8 +332,8 @@ codex-router-rs/
 │   ├── e2e.sh               # deterministic E2E layer: basic/models/tools/multiturn (193)
 │   └── e2e-real.sh          # opt-in real-provider smoke; refuses sandbox bypass (91)
 ├── docs/superpowers/
-│   ├── specs/              # Design spec
-│   └── plans/              # Implementation plan
+│   └── specs/              # Migration spec (the original design spec and plan
+│                           #   live in the retained codex-router-rs repo)
 ├── src/
 │   ├── main.rs             # CLI entry (clap) (175 lines)
 │   ├── bin/

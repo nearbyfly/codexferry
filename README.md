@@ -1,11 +1,11 @@
-# codex-router
+# codexferry
 
 Local proxy daemon that lets [Codex CLI](https://github.com/openai/codex) (≥0.128)
 use Chat-Completions-only LLM providers (DeepSeek, Kimi, GLM, SiliconFlow, …)
 through a single Responses-API endpoint.
 
 - **Protocol translation**: Converts between OpenAI Responses API and Chat Completions API (request + streaming SSE, token-by-token).
-- **One provider in Codex, many models**: Codex is configured with a single provider (`codex-router`); every upstream model is exposed as a `provider/alias` model name. Switch models with `codex -m deepseek/flash` — no Codex reconfiguration.
+- **One provider in Codex, many models**: Codex is configured with a single provider (`codexferry`); every upstream model is exposed as a `provider/alias` model name. Switch models with `codex -m deepseek/flash` — no Codex reconfiguration.
 - **Seamless model switching**: Multi-turn conversations keep their full history even when the new model is backed by a different upstream. From Codex's view it's just `codex -m`.
 - **Native passthrough**: Providers that already speak Responses API are forwarded (byte-for-byte verbatim when healing is off; leaked DSML/think markup is healed event-granular when the `dsml_heal`/`think_tags` quirks fire).
 - **Config hot-reload**: Edit TOML without restarting.
@@ -16,7 +16,7 @@ through a single Responses-API endpoint.
 
 ```bash
 cargo build --release
-# Binary: target/release/codex-router
+# Binary: target/release/codexferry
 ```
 
 Requirements: Rust stable (≥1.75), no system dependencies (uses rustls, not OpenSSL).
@@ -54,11 +54,11 @@ export DEEPSEEK_API_KEY="sk-your-key-here"
 ### 4. Run
 
 ```bash
-./target/release/codex-router
-# → codex-router listening on 127.0.0.1:8787
+./target/release/codexferry
+# → codexferry listening on 127.0.0.1:8787
 
 # Debug mode: verbose router logs + request/response body tracing, saved to /tmp/router-debug.log
-RUST_LOG=codex_router=debug CODEX_ROUTER_TRACE_BODY=1 ./target/release/codex-router 2>&1 | tee /tmp/router-debug.log
+RUST_LOG=codexferry=debug CODEXFERRY_TRACE_BODY=1 ./target/release/codexferry 2>&1 | tee /tmp/router-debug.log
 ```
 
 ### 5. Configure Codex CLI
@@ -66,17 +66,17 @@ RUST_LOG=codex_router=debug CODEX_ROUTER_TRACE_BODY=1 ./target/release/codex-rou
 In `~/.codex/config.toml`:
 
 ```toml
-[model_providers.router]
-name = "codex-router"
+[model_providers.codexferry]
+name = "codexferry"
 base_url = "http://127.0.0.1:8787/v1"
 wire_api = "responses"
-env_key = "CODEX_ROUTER_DUMMY"  # any non-empty value; the proxy handles real keys
+env_key = "CODEXFERRY_DUMMY"  # any non-empty value; the proxy handles real keys
 ```
 
 Set the dummy env var (Codex requires a non-empty key):
 
 ```bash
-export CODEX_ROUTER_DUMMY="dummy"
+export CODEXFERRY_DUMMY="dummy"
 ```
 
 That's the **only** provider Codex ever needs. The router aggregates every
@@ -209,9 +209,9 @@ disabled = ["glm_thinking"]
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CODEX_ROUTER_CONFIG` | `config.toml` | Path to config file |
-| `CODEX_ROUTER_TRACE_BODY` | (unset) | Set to `1` to log request/response bodies at debug level |
-| `RUST_LOG` | `codex_router=info` | Log level filter (e.g. `debug`, `codex_router=debug`) |
+| `CODEXFERRY_CONFIG` | `config.toml` | Path to config file |
+| `CODEXFERRY_TRACE_BODY` | (unset) | Set to `1` to log request/response bodies at debug level |
+| `RUST_LOG` | `codexferry=info` | Log level filter (e.g. `debug`, `codexferry=debug`) |
 
 ## Endpoints
 
@@ -241,17 +241,17 @@ unconditionally). Just point Codex at the router's base URL — no
 [models]
 # model_catalog_json is NOT needed — the router serves the catalog live
 
-[model_providers.codex-router]
-name = "codex-router"
+[model_providers.codexferry]
+name = "codexferry"
 base_url = "http://127.0.0.1:8787/v1"
 wire_api = "responses"
-env_key = "CODEX_ROUTER_DUMMY"  # any non-empty value; the proxy handles real keys
+env_key = "CODEXFERRY_DUMMY"  # any non-empty value; the proxy handles real keys
 ```
 
 Set the dummy env var (Codex requires a non-empty key):
 
 ```bash
-export CODEX_ROUTER_DUMMY="dummy"
+export CODEXFERRY_DUMMY="dummy"
 ```
 
 Codex fetches `{base_url}/models?client_version=...` once per turn and caches
@@ -270,9 +270,9 @@ The `gen-catalog` subcommand still exists for users who want a static
 cannot point Codex at the router):
 
 ```bash
-codex-router gen-catalog \
+codexferry gen-catalog \
   --config config.toml \
-  --out ~/.codex/router-catalog.json
+  --out ~/.codex/codexferry-catalog.json
 ```
 
 **Template search** (for inheriting fields like `base_instructions`):
@@ -318,11 +318,11 @@ wire.
 ```bash
 # Offline (default): regenerate the catalog and deep-compare with the
 # installed one, detecting any drift
-codex-router doctor --config config.toml
+codexferry doctor --config config.toml
 
 # Live: in-process mock upstream + temporary router + real `codex exec`,
 # asserting the normalized wire shape and a full tool round-trip (offline, zero tokens)
-codex-router doctor --live --config config.toml
+codexferry doctor --live --config config.toml
 ```
 
 Exit codes: 0 all pass; 1 a check failed; 2 environment unusable (e.g. codex
@@ -333,8 +333,8 @@ not installed).
 ```bash
 cargo build --release
 # If not pointing Codex at the router for live catalog, generate statically:
-# ./target/release/codex-router gen-catalog --out ~/.codex/router-catalog.json --config config.toml
-./target/release/codex-router doctor --live --config config.toml
+# ./target/release/codexferry gen-catalog --out ~/.codex/codexferry-catalog.json --config config.toml
+./target/release/codexferry doctor --live --config config.toml
 ```
 
 The "dropped N template field(s)" line in the generation log and doctor's INFO
@@ -346,13 +346,13 @@ first, then re-run.
 
 ```ini
 [Unit]
-Description=codex-router
+Description=codexferry
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/path/to/codex-router
-Environment=CODEX_ROUTER_CONFIG=/etc/codex-router/config.toml
+ExecStart=/path/to/codexferry
+Environment=CODEXFERRY_CONFIG=/etc/codexferry/config.toml
 Environment=DEEPSEEK_API_KEY=sk-your-key
 KillSignal=SIGTERM
 Restart=on-failure
@@ -369,7 +369,7 @@ in-flight requests complete).
 ### Chat format providers (`format = "chat"`)
 
 ```
-Codex CLI                    codex-router                    Upstream
+Codex CLI                    codexferry                    Upstream
     │                             │                             │
     │── POST /v1/responses ──────▶│                             │
     │   (Responses API, SSE)      │── POST /chat/completions ─▶│
@@ -454,13 +454,13 @@ cargo build --release
 cargo test
 
 # Run only unit tests (this is a binary-only crate, so use --bin)
-cargo test --bin codex-router
+cargo test --bin codexferry
 
 # Run only integration tests (spawns real binary + mock upstream)
 cargo test --test integration
 
 # See request/response bodies (debug)
-CODEX_ROUTER_TRACE_BODY=1 RUST_LOG=codex_router=debug cargo run
+CODEXFERRY_TRACE_BODY=1 RUST_LOG=codexferry=debug cargo run
 ```
 
 ## End-to-End Tests

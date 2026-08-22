@@ -1,5 +1,5 @@
-# codex-router configuration example
-# Copy to config.toml and adjust as needed (the path can be overridden with the CODEX_ROUTER_CONFIG env var).
+# codexferry configuration example
+# Copy to config.toml and adjust as needed (the path can be overridden with the CODEXFERRY_CONFIG env var).
 
 [server]
 # Bind address (localhost-only by default; this tool has no auth — do not expose it to the public internet)

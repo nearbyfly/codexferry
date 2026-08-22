@@ -5,14 +5,21 @@
 
 ## Project at a Glance
 
-`codex-router` is a local proxy daemon that lets Codex CLI (≥0.128) use
+`codexferry` is a local proxy daemon that lets Codex CLI (≥0.128) use
 Chat-Completions-only upstreams (DeepSeek, Kimi, GLM, SiliconFlow, …) through a
 single Responses-API endpoint. It routes by `provider/alias` model names,
 converts between Responses ↔ Chat Completions protocols, and maintains
 in-memory session state for cross-provider multi-turn conversations.
 
-**Spec:** `docs/superpowers/specs/2026-08-13-codex-router-design.md`
-**Plan:** `docs/superpowers/plans/2026-08-13-codex-router.md`
+**Migration spec:** `docs/superpowers/specs/2026-08-22-codexferry-migration-design.md`
+— this repo was migrated from `codex-router-rs` and renamed on 2026-08-22.
+
+**On `spec §N` references in source comments:** ~114 comments across the codebase
+cite sections of the *original* design doc (`spec §1` … `spec §14`), which was
+not carried over in the migration. Those section numbers resolve against
+`docs/superpowers/specs/2026-08-13-codex-router-design.md` in the retained
+`codex-router-rs` repo. They are kept because they mark genuine provenance —
+treat them as pointers to history, not to a file in this repo.
 
 ## Commit Convention
 
@@ -181,7 +188,7 @@ anomaly-only `warn!` exceptions (they fire on genuine anomalies, never on a
 healthy request): the `missing_done` quirk/truncation warns in the chat stream
 task, the streaming idle-timeout warns, and the non-2xx upstream body warn
 (body truncated to 1KB via `truncate_for_log`). Log level is controlled via
-`RUST_LOG`; `CODEX_ROUTER_TRACE_BODY=1` adds debug body tracing.
+`RUST_LOG`; `CODEXFERRY_TRACE_BODY=1` adds debug body tracing.
 
 ### 12. `/models` is dual-shape
 
@@ -264,7 +271,7 @@ Codex CLI ──POST /v1/responses──▶ axum daemon (127.0.0.1:8787)
 - **Integration tests** use the shared harness in `tests/common/mod.rs` plus five
   topical binaries (`chat_conversion.rs`, `passthrough.rs`, `healing.rs`,
   `sessions.rs`, `endpoints_metrics.rs`), each spawning the real binary as a
-  subprocess against a mock axum upstream. They use `CARGO_BIN_EXE_codex-router`
+  subprocess against a mock axum upstream. They use `CARGO_BIN_EXE_codexferry`
   and poll `/healthz` before making assertions.
 
 - **E2E scripts** (`scripts/e2e.sh`, `scripts/e2e-real.sh`) drive the real
@@ -296,6 +303,6 @@ Codex CLI ──POST /v1/responses──▶ axum daemon (127.0.0.1:8787)
   `tool_choice`) are extracted from `extra` in `to_chat_request()`.
 - **Non-streaming chat path reads bytes first**: the handler calls
   `upstream_resp.bytes().await` then `serde_json::from_slice` (not
-  `upstream_resp.json()`) so that `CODEX_ROUTER_TRACE_BODY` can log the raw body.
+  `upstream_resp.json()`) so that `CODEXFERRY_TRACE_BODY` can log the raw body.
 - **`SessionStore` is `Clone`**: it wraps `Arc<RwLock<SessionState>>`, so cloning
   is cheap and shares state. The streaming handler clones it into a spawned task.
