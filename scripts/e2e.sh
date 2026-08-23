@@ -76,10 +76,16 @@ scenario_models() {
   code=$(curl -s -o /dev/null -w '%{http_code}' -H "If-None-Match: $etag" "http://127.0.0.1:$ROUTER_PORT/v1/models?client_version=1")
   [ "$code" = "304" ] || fail "expected 304 on If-None-Match, got $code"
 
-  # A normal CLI start must succeed against this router (discovery implied).
+  # A normal CLI start must succeed against this router AND must have
+  # resolved its route through the live catalog. The old "discovery implied"
+  # assumption was false: under the previous env_key wiring codex never
+  # fetched /models and still started fine on fallback metadata. The
+  # command-auth wiring (e2e-lib.sh run_codex) plus the cache assertion below
+  # prove codex-side discovery for real.
   run_codex -m mocka/chat "Reply with exactly E2E_BASIC_OK"
   out=$(sed -n '/^codex$/, $p' "$(last_codex_output)")
   grep -qF 'E2E_BASIC_OK' <<<"$out" || fail "CLI start against catalog router failed"
+  assert_live_catalog_fetched mocka/chat mockb/chat mockr/resp
   cleanup_procs
   pass "models"
 }

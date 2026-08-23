@@ -71,6 +71,12 @@ start_mock() { # $1 scenario, $2 record path — sets MOCK_PORT/MOCK_PID
 
 start_router() { # $1 config path — sets ROUTER_PORT/ROUTER_PID
   ROUTER_PORT=$(awk -F' = ' '/^port = / {print $2; exit}' "$1")
+  # Each scenario starts a NEW router on a new port, but codex's models cache
+  # ($CODEX_HOME/models_cache.json, TTL 300s) survives from the previous
+  # scenario and is keyed only by client_version - a warm cache would let the
+  # next scenario's run_codex skip the /models fetch entirely and false-green
+  # the live-catalog assertions (scenario_models). Clear it per router start.
+  rm -f "$ARTIFACT_DIR/codex-home/models_cache.json"
   CODEXFERRY_CONFIG="$1" "$REPO_ROOT/target/debug/codexferry" \
     >"$ARTIFACT_DIR/router.log" 2>&1 &
   ROUTER_PID=$!
@@ -84,8 +90,12 @@ start_router() { # $1 config path — sets ROUTER_PORT/ROUTER_PID
 # `model_provider="e2e"` must be selected explicitly: defining
 # model_providers.e2e alone does not change which provider the CLI uses for
 # `-m` routes, and the resident ~/.codex/config.toml may set a different
-# default model_provider (e.g. "router") that would hijack the request.
-# env_key is a dummy: the router does not authenticate clients.
+# default model_provider (e.g. "codexferry") that would hijack the request.
+# Auth is COMMAND-based (`auth = {command="echo", args=["dummy"]}`): codex
+# only fetches the live /v1/models?client_version= catalog for ChatGPT-auth
+# or command-auth providers - an env_key provider NEVER fetches, so the old
+# env_key wiring silently skipped catalog discovery in every scenario. The
+# router does not authenticate clients; the echoed token is a dummy.
 run_codex() { # args…: -m <route> "<prompt>"
   mkdir -p "$ARTIFACT_DIR/codex-home"
   # Sandbox selection: default read-only (Task 4). E2E_CODEX_SANDBOX=bypass
@@ -100,12 +110,12 @@ run_codex() { # args…: -m <route> "<prompt>"
   if [ "${E2E_CODEX_SANDBOX:-read-only}" = bypass ]; then
     sandbox_flags=(--dangerously-bypass-approvals-and-sandbox)
   fi
-  CODEX_HOME="$ARTIFACT_DIR/codex-home" E2E_DUMMY_KEY=dummy codex exec "${sandbox_flags[@]}" --skip-git-repo-check \
+  CODEX_HOME="$ARTIFACT_DIR/codex-home" codex exec "${sandbox_flags[@]}" --skip-git-repo-check \
     -c 'model_provider="e2e"' \
     -c 'model_providers.e2e.name="e2e"' \
     -c "model_providers.e2e.base_url=\"http://127.0.0.1:${ROUTER_PORT}/v1\"" \
     -c 'model_providers.e2e.wire_api="responses"' \
-    -c 'model_providers.e2e.env_key="E2E_DUMMY_KEY"' \
+    -c 'model_providers.e2e.auth={command="echo",args=["dummy"]}' \
     "$@" >"$ARTIFACT_DIR/codex-$(date +%s%N).log" 2>&1
 }
 
@@ -120,17 +130,39 @@ run_codex() { # args…: -m <route> "<prompt>"
 # short -s flag does not. The provider overrides (including the
 # model_provider selection; see run_codex) are repeated here. CODEX_HOME
 # points at the same scratch home as run_codex so `--last` finds the session
-# recorded there.
+# recorded there. Auth stays command-based for the same reason as run_codex
+# (env_key providers never fetch the live catalog).
 run_codex_resume() { # args…: -m <route> "<prompt>"
   mkdir -p "$ARTIFACT_DIR/codex-home"
-  CODEX_HOME="$ARTIFACT_DIR/codex-home" E2E_DUMMY_KEY=dummy codex exec resume --last --skip-git-repo-check \
+  CODEX_HOME="$ARTIFACT_DIR/codex-home" codex exec resume --last --skip-git-repo-check \
     -c 'model_provider="e2e"' \
     -c 'sandbox_mode="read-only"' \
     -c 'model_providers.e2e.name="e2e"' \
     -c "model_providers.e2e.base_url=\"http://127.0.0.1:${ROUTER_PORT}/v1\"" \
     -c 'model_providers.e2e.wire_api="responses"' \
-    -c 'model_providers.e2e.env_key="E2E_DUMMY_KEY"' \
+    -c 'model_providers.e2e.auth={command="echo",args=["dummy"]}' \
     "$@" >"$ARTIFACT_DIR/codex-resume-$(date +%s%N).log" 2>&1
+}
+
+# Assert that codex actually FETCHED the live catalog: the models cache file
+# codex writes after a successful /models fetch must exist and contain every
+# given route slug. Only codex writes this file (a curl probe never does), so
+# its presence after a cleared-cache run_codex is the codex-side discovery
+# proof - the missing piece of the old "discovery implied" assumption, which
+# was false under env_key wiring (codex never fetched and still started fine
+# on fallback metadata).
+assert_live_catalog_fetched() { # $1… route slugs
+  local cache="$ARTIFACT_DIR/codex-home/models_cache.json"
+  [ -f "$cache" ] || fail "codex did not write $cache - live /models fetch never happened"
+  python3 - "$cache" "$@" <<'PY'
+import json, sys
+cache = json.load(open(sys.argv[1]))
+slugs = {m.get("slug") for m in cache.get("models", [])}
+missing = [r for r in sys.argv[2:] if r not in slugs]
+if missing:
+    print(f"live catalog cache missing routes: {missing} (has {sorted(slugs)})", file=sys.stderr)
+    sys.exit(1)
+PY
 }
 
 last_codex_output() { # newest codex-*.log in ARTIFACT_DIR

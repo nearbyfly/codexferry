@@ -68,6 +68,12 @@ for route in $E2E_REAL_ROUTES; do
   metrics_assert_absent  "$PORT" 'error_class="stream_truncated"'
 done
 
+# The command-auth wiring (e2e-lib.sh run_codex) makes codex fetch the live
+# catalog from THIS dedicated router on the first turn; assert every tested
+# route actually arrived through /models (the cache file only exists when
+# codex itself fetched it - fallback metadata never writes it).
+assert_live_catalog_fetched $E2E_REAL_ROUTES
+
 if [ "$(wc -w <<<"$E2E_REAL_ROUTES")" -ge 2 ]; then
   # The loop just ran the LAST route, so `exec resume --last` resumes the
   # final route; target the FIRST route to exercise a real cross-provider
