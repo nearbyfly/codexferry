@@ -105,7 +105,7 @@ enum Commands {
     /// the normalized wire shape and a full tool round-trip.
     Doctor {
         /// Path to the router TOML config (defaults to CODEXFERRY_CONFIG
-        /// or ./config.toml, same rule as the server).
+        /// or ./cxf.toml, same rule as the server).
         #[arg(long)]
         config: Option<PathBuf>,
         /// Path to the installed catalog JSON
@@ -154,11 +154,7 @@ async fn main() -> anyhow::Result<()> {
             codex_models,
             live,
         }) => {
-            let config_path = config.unwrap_or_else(|| {
-                std::env::var("CODEXFERRY_CONFIG")
-                    .unwrap_or_else(|_| "config.toml".into())
-                    .into()
-            });
+            let config_path = config.unwrap_or_else(crate::config::default_config_path);
             doctor::run_doctor(
                 &config_path,
                 catalog.as_deref(),

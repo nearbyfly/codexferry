@@ -1,0 +1,47 @@
+# ~/.codex/config.toml -- codexferry wiring, DYNAMIC catalog mode (recommended).
+#
+# Copy to ~/.codex/config.toml (merge with your own approval/sandbox/projects
+# settings). This is the mode verified end-to-end on codex 0.147.0:
+# codex fetches the model catalog live from codexferry at
+# GET /v1/models?client_version=... on session start (cache miss) and caches
+# it in ~/.codex/models_cache.json (TTL 300s, ETag revalidation).
+#
+# The switch that makes it work: provider auth via COMMAND. codex fetches
+# /models when the active auth is a Codex-backed mode (ChatGPT OAuth, headers,
+# agent identity, or personal-access-token modes) or the provider declares an
+# auth command (codex-rs models-manager/src/manager.rs `should_refresh_models`);
+# an env_key-only provider with no Codex-backed auth never fetches. `auth` is
+# mutually exclusive with env_key / experimental_bearer_token /
+# requires_openai_auth in codex's config schema - do not combine them.
+#
+# The router does not authenticate clients, so the echoed token is a dummy.
+
+model = "deepseek/deepseek-v4-flash"      # any configured route key
+model_provider = "codexferry"
+
+# NO model_catalog_json here: a pinned catalog switches codex to static mode
+# (StaticModelsManager) and the live fetch never happens, even with command
+# auth. If a pin is present in your file, remove it for dynamic mode.
+
+[model_providers.codexferry]
+name = "codexferry"
+base_url = "http://127.0.0.1:8787/v1"     # must match [server] in cxf.toml
+wire_api = "responses"
+
+[model_providers.codexferry.auth]
+command = "echo"                          # stdout (trimmed, non-empty) = bearer token
+args = ["dummy-token"]
+# timeout_ms = 5000                        # default 5000
+# refresh_interval_ms = 300000             # default 300000 (token cache lifetime)
+
+# Behavior notes:
+# - The /model picker list is MERGED: codexferry routes + codex's bundled
+#   models. Non-ChatGPT auth cannot replace the bundled list (codex-rs
+#   `apply_remote_models` requires a ChatGPT account for replace semantics).
+# - Adding a route to cxf.toml hot-reloads the daemon; codex sees it after its
+#   models cache expires (or immediately on a fresh CODEX_HOME / cache delete).
+# - Verify: `codex debug models` must list your routes;
+#   `~/.codex/models_cache.json` must contain them.
+#
+# Static mode (pinned catalog file, pure model list) instead?
+# See codex-config-static.toml.example next to this file.

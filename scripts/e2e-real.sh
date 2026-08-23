@@ -3,7 +3,7 @@
 # router instance. Costs tokens: prompts are tiny, <= 3 turns per route.
 # Requires a debug build first: cargo build --quiet --bin codexferry.
 # Usage: E2E_REAL_ROUTES="glm/glm-4.7 deepseek/deepseek-v4-flash" \
-#        [E2E_REAL_CONFIG=path/to/config.toml] scripts/e2e-real.sh
+#        [E2E_REAL_CONFIG=path/to/cxf.toml] scripts/e2e-real.sh
 set -euo pipefail
 source "$(dirname "$0")/e2e-lib.sh"
 
@@ -37,7 +37,7 @@ metrics_success_count() { # $1 router port, $2 route
   fi
 }
 
-REAL_CONFIG="${E2E_REAL_CONFIG:-$HOME/.config/codexferry/config.toml}"
+REAL_CONFIG="${E2E_REAL_CONFIG:-$HOME/.config/codexferry/cxf.toml}"
 [ -f "$REAL_CONFIG" ] || fail "router config not found: $REAL_CONFIG"
 [ -x "$REPO_ROOT/target/debug/codexferry" ] || fail "build codexferry first: cargo build --quiet --bin codexferry"
 
@@ -67,6 +67,12 @@ for route in $E2E_REAL_ROUTES; do
   metrics_assert_contains "$PORT" 'error_class=""'
   metrics_assert_absent  "$PORT" 'error_class="stream_truncated"'
 done
+
+# The command-auth wiring (e2e-lib.sh run_codex) makes codex fetch the live
+# catalog from THIS dedicated router on the first turn; assert every tested
+# route actually arrived through /models (the cache file only exists when
+# codex itself fetched it - fallback metadata never writes it).
+assert_live_catalog_fetched $E2E_REAL_ROUTES
 
 if [ "$(wc -w <<<"$E2E_REAL_ROUTES")" -ge 2 ]; then
   # The loop just ran the LAST route, so `exec resume --last` resumes the

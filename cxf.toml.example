@@ -1,5 +1,9 @@
-# codexferry configuration example
-# Copy to config.toml and adjust as needed (the path can be overridden with the CODEXFERRY_CONFIG env var).
+# codexferry (router) configuration example
+# Copy to cxf.toml and adjust as needed (the path can be overridden with the
+# CODEXFERRY_CONFIG env var; a legacy ./config.toml still loads with a warning).
+# This is the ROUTER side. For the Codex CLI side (~/.codex/config.toml) see
+# scripts/codex-config-dynamic.toml.example and
+# scripts/codex-config-static.toml.example.
 
 [server]
 # Bind address (localhost-only by default; this tool has no auth — do not expose it to the public internet)
