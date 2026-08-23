@@ -304,6 +304,31 @@ metrics_assert_absent() { # $1 router port, $2 substring
   ! grep -qF "$2" <<<"$body" || fail "metrics unexpectedly contain: $2"
 }
 
+# Doctor offline quick-check runner (Task 10): scopes HOME to the artifact
+# doctor-home so `codexferry doctor` reads the scenario-supplied
+# ~/.codex/config.toml and never touches the user's real home. Stores the
+# captured report in DOCTOR_LAST_OUTPUT so scenarios can assert extra lines
+# after the common shape. `|| true` is required: a FAILing doctor exits 1 and
+# the script runs with `set -euo pipefail`.
+assert_doctor_offline_passes() { # $1 router-config-path, $2 expected-mode
+  local out
+  out=$(HOME="$ARTIFACT_DIR/doctor-home" "$REPO_ROOT/target/debug/codexferry" doctor --offline --config "$1" 2>&1 || true)
+  DOCTOR_LAST_OUTPUT=$out
+  grep -qF 'INFO: detected mode' <<<"$out" || fail "doctor output missing detected-mode INFO line (expected $2)\n$out"
+  grep -qF "detected mode — $2 (" <<<"$out" || fail "doctor output detected a different mode than $2\n$out"
+  ! grep -qF 'FAIL:' <<<"$out" || fail "doctor output has FAIL lines (expected mode $2)\n$out"
+}
+
+# Same invocation as assert_doctor_offline_passes, but for scenarios that must
+# see a FAIL (currently unused; intended for future stale-pin scenarios).
+assert_doctor_offline_fails() { # $1 router-config-path, $2 expected-fail-substr
+  local out
+  out=$(HOME="$ARTIFACT_DIR/doctor-home" "$REPO_ROOT/target/debug/codexferry" doctor --offline --config "$1" 2>&1 || true)
+  DOCTOR_LAST_OUTPUT=$out
+  grep -qF 'FAIL:' <<<"$out" || fail "doctor output has no FAIL line (expected: $2)\n$out"
+  grep -qF "$2" <<<"$out" || fail "doctor output missing expected FAIL detail '$2'\n$out"
+}
+
 cleanup_procs() {
   kill "${ROUTER_PID:-}" "${MOCK_PID:-}" 2>/dev/null || true
   wait "${ROUTER_PID:-}" "${MOCK_PID:-}" 2>/dev/null || true
