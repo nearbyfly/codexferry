@@ -799,6 +799,7 @@ pub fn spawn_watcher(path: &Path, shared: SharedConfig) -> anyhow::Result<impl W
                                 if let Ok(mut guard) = shared.try_write() {
                                     *guard = new_cfg;
                                     tracing::info!("config reloaded successfully");
+                                    invalidate_codex_catalog_cache();
                                 } else {
                                     tracing::warn!(
                                         "config reload skipped: config lock busy, keeping current config"
@@ -829,9 +830,80 @@ pub fn spawn_watcher(path: &Path, shared: SharedConfig) -> anyhow::Result<impl W
     Ok(watcher)
 }
 
+/// Codex CLI writes `~/.codex/models_cache.json` after a successful
+/// `/v1/models` fetch and reuses it (TTL 300s) on later turns. That cache
+/// locks the active TUI session to whichever routes existed at session
+/// start - adding a new route to `cxf.toml` does NOT make it appear in
+/// the `/model` picker, and the user's `-m` selection stays pinned to the
+/// old slug (the router rejects those requests with 400).
+///
+/// Removing the cache file forces codex's next `list_models(OnlineIfUncached)`
+/// to re-fetch `/v1/models` from the now-hot-reloaded router. The TUI
+/// picker then shows the new route, and codex's existing thread-settings
+/// RPC (`AppEvent::UpdateModel` -> `sync_active_thread_model_setting` in
+/// `codex-rs/tui/src/app/thread_settings.rs`) lets the user switch to it
+/// via `/model` mid-session - no restart needed.
+///
+/// No-op in static mode (codex never writes `models_cache.json` when a
+/// `model_catalog_json` pin is in effect) and when the file is absent
+/// already.
+fn invalidate_codex_catalog_cache() {
+    let Some(path) = codex_catalog_cache_path() else {
+        return;
+    };
+    match invalidate_path(&path) {
+        Ok(()) => tracing::info!("invalidated codex catalog cache at {}", path.display()),
+        Err(e) => tracing::warn!(
+            "failed to invalidate codex catalog cache ({}): {e}",
+            path.display()
+        ),
+    }
+}
+
+/// Resolve `~/.codex/models_cache.json` honoring `CODEX_HOME` (codex
+/// default = `$CODEX_HOME`; fallback = `$HOME/.codex`). Returns None
+/// when neither env var is set.
+fn codex_catalog_cache_path() -> Option<std::path::PathBuf> {
+    let base = std::env::var("CODEX_HOME")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|h| std::path::PathBuf::from(format!("{h}/.codex")))
+        })?;
+    Some(base.join("models_cache.json"))
+}
+
+/// Remove `path`, treating `NotFound` as success. Pure (no env reads) so
+/// the unit tests can exercise it without env-var mutation hazards.
+pub(crate) fn invalidate_path(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalidate_path_removes_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("models_cache.json");
+        std::fs::write(&path, "{}").unwrap();
+        invalidate_path(&path).expect("removing existing cache should succeed");
+        assert!(!path.exists(), "cache file must be gone after invalidation");
+    }
+
+    #[test]
+    fn invalidate_path_missing_file_is_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("does-not-exist.json");
+        invalidate_path(&path).expect("NotFound is success - no-op");
+    }
 
     #[test]
     fn default_path_env_var_wins_over_both_filenames() {
