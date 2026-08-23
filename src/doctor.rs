@@ -303,12 +303,8 @@ pub(crate) fn offline_checks_with_mode(
                 if let Ok(router) =
                     crate::config::Config::parse_file(config_path).and_then(|c| c.validate())
                 {
-                    if let Some(c) = pin_covers_router(&router, &pin) {
-                        checks.push(c);
-                    }
-                    if let Some(c) = pin_matches_router(&router, &pin) {
-                        checks.push(c);
-                    }
+                    checks.push(pin_covers_router(&router, &pin));
+                    checks.push(pin_matches_router(&router, &pin));
                     checks.extend(pin_field_shape(&pin));
                 }
             }
@@ -497,7 +493,10 @@ fn read_pin(codex_toml: Option<&str>) -> Result<(PathBuf, Value), String> {
                 .map(str::to_string)
         })
         .ok_or_else(|| {
-            "~/.codex/config.toml has no string `model_catalog_json` — set it to the file `codexferry gen-catalog` writes".to_string()
+            "~/.codex/config.toml has no string `model_catalog_json` — run \
+             `codexferry gen-catalog --config cxf.toml --out ~/.codex/codexferry-catalog.json` \
+             and set `model_catalog_json` to that path"
+                .to_string()
         })?;
     let path = resolve_pin_path(&raw);
     let text = std::fs::read_to_string(&path)
@@ -522,31 +521,35 @@ fn pin_file_check(text: &str) -> Result<Value, String> {
     }
 }
 
-/// The sorted, deduplicated slug list of a parsed pin, or `None` when the
-/// pin has no `models` array.
+/// The sorted, deduplicated STRING slug list of a parsed pin.
 ///
-/// `None` is defensive only: the caller's [`pin_file_check`] guarantees the
-/// array exists before the reconciliation checks run.
-fn pin_slugs(pin: &Value) -> Option<Vec<&str>> {
-    let mut slugs: Vec<&str> = pin
-        .get("models")?
-        .as_array()?
+/// Non-string slugs are deliberately dropped here: reconciliation compares
+/// router route keys against string slugs only, while [`pin_field_shape`]
+/// rejects a present-but-non-string `slug` outright (codex's `ModelInfo`
+/// deserialization would too). The caller's [`pin_file_check`] guarantees
+/// `models` is an array, so extraction cannot fail.
+fn pin_slugs(pin: &Value) -> Vec<&str> {
+    let models = pin
+        .get("models")
+        .and_then(Value::as_array)
+        .expect("pin_file_check guarantees a `models` array");
+    let mut slugs: Vec<&str> = models
         .iter()
         .filter_map(|entry| entry.get("slug").and_then(Value::as_str))
         .collect();
     slugs.sort_unstable();
     slugs.dedup();
-    Some(slugs)
+    slugs
 }
 
 /// Spec L2.8: every router route key must appear as a pin `models[].slug`.
 ///
 /// Missing slugs mean the pin is stale relative to the router (or the
 /// router is stale relative to the pin) — FAIL listing them with the
-/// `gen-catalog` remediation. `None` only when the pin has no `models`
-/// array, which the caller's [`pin_file_check`] rules out upstream.
-fn pin_covers_router(router: &crate::config::ValidatedConfig, pin: &Value) -> Option<Check> {
-    let slugs = pin_slugs(pin)?;
+/// `gen-catalog` remediation. The caller's [`pin_file_check`] guarantees the
+/// pin is a well-formed `{"models": [...]}` document.
+fn pin_covers_router(router: &crate::config::ValidatedConfig, pin: &Value) -> Check {
+    let slugs = pin_slugs(pin);
     let mut missing: Vec<&str> = router
         .routes
         .keys()
@@ -555,19 +558,16 @@ fn pin_covers_router(router: &crate::config::ValidatedConfig, pin: &Value) -> Op
         .collect();
     missing.sort_unstable();
     if missing.is_empty() {
-        Some(Check::pass(
-            "pin covers router",
-            "every router route is in the pin",
-        ))
+        Check::pass("pin covers router", "every router route is in the pin")
     } else {
-        Some(Check::fail(
+        Check::fail(
             "pin covers router",
             format!(
                 "pin is missing {} router route(s): {} — rerun `codexferry gen-catalog`",
                 missing.len(),
                 missing.join(", "),
             ),
-        ))
+        )
     }
 }
 
@@ -575,28 +575,25 @@ fn pin_covers_router(router: &crate::config::ValidatedConfig, pin: &Value) -> Op
 ///
 /// Orphan slugs mean the pin holds models the router no longer serves —
 /// FAIL listing them with the `gen-catalog` remediation. Symmetric to
-/// [`pin_covers_router`], with the same `None` contract.
-fn pin_matches_router(router: &crate::config::ValidatedConfig, pin: &Value) -> Option<Check> {
-    let slugs = pin_slugs(pin)?;
+/// [`pin_covers_router`].
+fn pin_matches_router(router: &crate::config::ValidatedConfig, pin: &Value) -> Check {
+    let slugs = pin_slugs(pin);
     let orphans: Vec<&str> = slugs
         .iter()
         .copied()
         .filter(|slug| !router.routes.contains_key(*slug))
         .collect();
     if orphans.is_empty() {
-        Some(Check::pass(
-            "pin matches router",
-            "every pin slug is a router route",
-        ))
+        Check::pass("pin matches router", "every pin slug is a router route")
     } else {
-        Some(Check::fail(
+        Check::fail(
             "pin matches router",
             format!(
                 "pin has {} orphan slug(s) not in the router: {} — rerun `codexferry gen-catalog`",
                 orphans.len(),
                 orphans.join(", "),
             ),
-        ))
+        )
     }
 }
 
@@ -604,10 +601,12 @@ fn pin_matches_router(router: &crate::config::ValidatedConfig, pin: &Value) -> O
 ///
 /// This is the static-mode equivalent of the live class-3 shape check: a
 /// codex upgrade that adds a required `ModelInfo` field surfaces here as
-/// soon as the user runs doctor. Returns one PASS when every entry is
-/// complete, or one FAIL per offending entry naming the missing fields and
-/// the entry's slug (an entry missing `slug` itself is identified as
-/// `<missing slug>`).
+/// soon as the user runs doctor. A present-but-non-string `slug` is treated
+/// as a malformed `slug` field — `contains_key` alone would false-green an
+/// entry codex rejects at session start. Returns one PASS when every entry
+/// is complete, or one FAIL per offending entry naming the missing/malformed
+/// fields and the entry's slug (a missing `slug` is identified as
+/// `<missing slug>`, a non-string `slug` as `<non-string slug>`).
 fn pin_field_shape(pin: &Value) -> Vec<Check> {
     let Some(models) = pin.get("models").and_then(Value::as_array) else {
         return Vec::new();
@@ -617,20 +616,24 @@ fn pin_field_shape(pin: &Value) -> Vec<Check> {
         let Some(obj) = entry.as_object() else {
             continue;
         };
-        let slug = obj
-            .get("slug")
-            .and_then(Value::as_str)
-            .unwrap_or("<missing slug>");
+        let slug = match obj.get("slug") {
+            Some(Value::String(s)) => s.as_str(),
+            Some(_) => "<non-string slug>",
+            None => "<missing slug>",
+        };
         let missing: Vec<&str> = REQUIRED_FIELDS
             .iter()
             .copied()
-            .filter(|field| !obj.contains_key(*field))
+            .filter(|field| match *field {
+                "slug" => !matches!(obj.get("slug"), Some(Value::String(_))),
+                _ => !obj.contains_key(*field),
+            })
             .collect();
         if !missing.is_empty() {
             checks.push(Check::fail(
                 "pin entry shape",
                 format!(
-                    "pin entry {slug:?} is missing required field(s): {}",
+                    "pin entry {slug:?} has missing or malformed required field(s): {}",
                     missing.join(", "),
                 ),
             ));
@@ -1117,8 +1120,13 @@ base_url = "http://127.0.0.1:9999/v1"
     }
 
     /// One fully-shaped pin entry: every field codex >= 0.147's `ModelInfo`
-    /// requires (the fixture intentionally lists them literally so a drift
-    /// between the fixture and `REQUIRED_FIELDS` still fails the shape test).
+    /// requires, each with a presence-only stand-in value. The field list is
+    /// written literally (rather than derived from `REQUIRED_FIELDS`) so a
+    /// drift between the two still fails the shape test. Values deliberately
+    /// do not mirror real gen-catalog output byte-for-byte — e.g. here
+    /// `supported_reasoning_levels` is a flat string array where the real
+    /// generator emits effort/description objects — because the shape check
+    /// tests field presence, not field values.
     fn pin_entry(slug: &str) -> serde_json::Value {
         serde_json::json!({
             "slug": slug,
@@ -1134,8 +1142,9 @@ base_url = "http://127.0.0.1:9999/v1"
         })
     }
 
-    /// A `{"models": [...]}` pin with one complete entry per slug, matching
-    /// the JSON shape `codexferry gen-catalog` writes.
+    /// A `{"models": [...]}` pin with one complete entry per slug: the same
+    /// top-level shape `codexferry gen-catalog` writes, using the
+    /// presence-only [`pin_entry`] fixture.
     fn good_pin(slugs: &[&str]) -> serde_json::Value {
         let models: Vec<serde_json::Value> = slugs.iter().map(|s| pin_entry(s)).collect();
         serde_json::json!({ "models": models })
@@ -1170,7 +1179,7 @@ base_url = "http://127.0.0.1:9999/v1"
     fn pin_covers_router_passes_when_every_route_is_pinned() {
         let router = validated_router_with(&["x/a", "x/b"]);
         let pin = good_pin(&["x/a", "x/b"]);
-        let c = pin_covers_router(&router, &pin).unwrap();
+        let c = pin_covers_router(&router, &pin);
         assert_eq!(c.name, "pin covers router");
         assert_eq!(c.status, CheckStatus::Pass, "{c:?}");
     }
@@ -1179,7 +1188,7 @@ base_url = "http://127.0.0.1:9999/v1"
     fn pin_covers_router_fails_listing_routes_missing_from_the_pin() {
         let router = validated_router_with(&["x/a", "x/b"]);
         let pin = good_pin(&["x/a"]);
-        let c = pin_covers_router(&router, &pin).unwrap();
+        let c = pin_covers_router(&router, &pin);
         assert_eq!(c.status, CheckStatus::Fail, "{c:?}");
         assert!(c.detail.contains("x/b"), "{c:?}");
         assert!(c.detail.contains("gen-catalog"), "{c:?}");
@@ -1189,7 +1198,7 @@ base_url = "http://127.0.0.1:9999/v1"
     fn pin_matches_router_passes_when_every_pin_slug_is_a_route() {
         let router = validated_router_with(&["x/a", "x/b"]);
         let pin = good_pin(&["x/a", "x/b"]);
-        let c = pin_matches_router(&router, &pin).unwrap();
+        let c = pin_matches_router(&router, &pin);
         assert_eq!(c.name, "pin matches router");
         assert_eq!(c.status, CheckStatus::Pass, "{c:?}");
     }
@@ -1198,7 +1207,7 @@ base_url = "http://127.0.0.1:9999/v1"
     fn pin_matches_router_fails_listing_orphan_slugs() {
         let router = validated_router_with(&["x/a"]);
         let pin = good_pin(&["x/a", "x/c"]);
-        let c = pin_matches_router(&router, &pin).unwrap();
+        let c = pin_matches_router(&router, &pin);
         assert_eq!(c.status, CheckStatus::Fail, "{c:?}");
         assert!(c.detail.contains("x/c"), "{c:?}");
         assert!(c.detail.contains("gen-catalog"), "{c:?}");
@@ -1210,8 +1219,8 @@ base_url = "http://127.0.0.1:9999/v1"
     fn empty_router_and_empty_pin_reconcile_cleanly() {
         let router = validated_router_with(&[]);
         let pin = good_pin(&[]);
-        let covers = pin_covers_router(&router, &pin).unwrap();
-        let matches = pin_matches_router(&router, &pin).unwrap();
+        let covers = pin_covers_router(&router, &pin);
+        let matches = pin_matches_router(&router, &pin);
         assert_eq!(covers.status, CheckStatus::Pass, "{covers:?}");
         assert_eq!(matches.status, CheckStatus::Pass, "{matches:?}");
     }
@@ -1276,6 +1285,47 @@ base_url = "http://127.0.0.1:9999/v1"
         assert_eq!(checks.len(), 2, "{checks:?}");
         assert!(
             checks.iter().all(|c| c.status == CheckStatus::Fail),
+            "{checks:?}"
+        );
+    }
+
+    /// A present-but-non-string `slug` must not false-pass the shape check:
+    /// codex's `ModelInfo` deserialization rejects it at session start even
+    /// though every other required field is present. The FAIL names the
+    /// `slug` field and identifies the entry as `<non-string slug>`.
+    #[test]
+    fn pin_field_shape_flags_a_non_string_slug_instead_of_false_passing() {
+        let mut pin = good_pin(&["x/a"]);
+        pin["models"][0]
+            .as_object_mut()
+            .unwrap()
+            .insert("slug".into(), serde_json::json!(123));
+        let checks = pin_field_shape(&pin);
+        assert_eq!(checks.len(), 1, "{checks:?}");
+        let c = &checks[0];
+        assert_eq!(c.name, "pin entry shape");
+        assert_eq!(c.status, CheckStatus::Fail, "{c:?}");
+        assert!(c.detail.contains("slug"), "{c:?}");
+        assert!(c.detail.contains("<non-string slug>"), "{c:?}");
+        assert!(report_has_fail(&checks), "{checks:?}");
+    }
+
+    /// Drift guard: the generator and [`REQUIRED_FIELDS`] must stay in
+    /// sync, or a codex upgrade adding a required `ModelInfo` field would
+    /// go unnoticed. Drive the real generator on a temp config and feed its
+    /// output straight into the shape check. An explicit empty template
+    /// keeps the test off the host's real `~/.codex/` and off `codex`.
+    #[test]
+    fn generated_catalog_always_satisfies_pin_field_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = write_config(dir.path());
+        let template = dir.path().join("models.json");
+        std::fs::write(&template, "{}").unwrap();
+        let generated = catalog::generate_catalog(&config_path, Some(&template)).unwrap();
+        let checks = pin_field_shape(&generated.catalog);
+        assert!(!checks.is_empty(), "shape check emitted nothing");
+        assert!(
+            checks.iter().all(|c| c.status == CheckStatus::Pass),
             "{checks:?}"
         );
     }
@@ -1383,5 +1433,41 @@ base_url = "http://127.0.0.1:9999/v1"
         assert_eq!(unreadable.status, CheckStatus::Fail, "{unreadable:?}");
         assert!(unreadable.detail.contains("JSON"), "{unreadable:?}");
         assert!(report_has_fail(&checks), "{checks:?}");
+    }
+
+    /// Defensive L2.7 branch: `detect_mode` never classifies a missing or
+    /// non-string `model_catalog_json` as Pinned, but a direct pinned-mode
+    /// caller must still be told the pin is unreadable rather than silently
+    /// skipping the pinned checks.
+    #[test]
+    fn pinned_mode_without_a_string_pin_key_fails_pin_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = write_config(dir.path());
+        for codex_toml in [
+            None,
+            Some("model_provider = \"codexferry\"\n"),
+            Some("model_catalog_json = 123\n"),
+        ] {
+            let checks = offline_checks_with_mode(
+                &config_path,
+                None,
+                Mode::Pinned,
+                "codexferry",
+                codex_toml,
+                None,
+                &DoctorState::default(),
+            );
+            let unreadable = checks
+                .iter()
+                .find(|c| c.name == "pin unreadable")
+                .unwrap_or_else(|| panic!("missing \"pin unreadable\" in {checks:?}"));
+            assert_eq!(unreadable.status, CheckStatus::Fail, "{unreadable:?}");
+            assert!(
+                unreadable.detail.contains("model_catalog_json"),
+                "{unreadable:?}"
+            );
+            assert!(unreadable.detail.contains("gen-catalog"), "{unreadable:?}");
+            assert!(report_has_fail(&checks), "{checks:?}");
+        }
     }
 }
