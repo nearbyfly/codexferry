@@ -14,8 +14,9 @@
 //! matter which mode `detect_mode` reports), the pinned-mode checks (spec
 //! L2.7–L2.10: pin exists + parses, pin ⊇ router routes, pin ⊆ router routes,
 //! pin entry field shape), the dynamic-mode endpoint checks (spec
-//! L2.8'–L2.9': `/v1/models` smoke + catalog shape) and version status vs the
-//! persisted doctor state. Every environment-dependent input is best-effort:
+//! L2.8'–L2.9': `/v1/models` smoke + catalog shape), version age (L2.6) and
+//! version status vs the persisted doctor state. Every environment-dependent
+//! input is best-effort:
 //! no `~/.codex/config.toml` or no codex on PATH degrades to INFO/WARN. The
 //! one exception is L2.7: in pinned mode an unreadable pin FAILs, because
 //! codex cannot start until it is regenerated.
@@ -223,11 +224,15 @@ pub(crate) fn offline_checks_with_env(
 ///    [`Mode::Dynamic`]): ONE shared `/v1/models` fetch (see
 ///    [`fetch_models`]) feeding the endpoint smoke (L2.8') and endpoint
 ///    catalog shape (L2.9') checks against this instance's own bind address.
-/// 10. `codex version status`: [`version_status`] vs the persisted state.
+/// 10. `codex version age` (L2.6): [`version_age`] — with `LAST_VERIFIED`
+///     empty for now, any installed codex is newer than everything codexferry
+///     has verified against.
+/// 11. `codex version status`: [`version_status`] vs the persisted state.
 ///
-/// L2.6 (version age) is not here — it belongs to a later task. The pinned
-/// L2.7–L2.10 checks ARE here (the L2.7 pin-existence check, L2.8/L2.9
-/// reconciliation, and L2.10 field shape run in the block below);
+/// Items 10–11 are mode-independent ("L1 always" per the plan): they run in
+/// every mode as the last two lines. The pinned L2.7–L2.10 checks ARE here
+/// (the L2.7 pin-existence check, L2.8/L2.9 reconciliation, and L2.10 field
+/// shape run in the block below);
 /// [`mode_keyed_check`] implements the static-pin INFO / degraded-fallback
 /// L2.7'' branches above, and [`pin_shadow_warn`] the both-keys L2.7' WARN
 /// (called from both the Pinned and Dynamic branches below, because a string
@@ -355,6 +360,11 @@ pub(crate) fn offline_checks_with_mode(
         let fetch = fetch_models(&expected);
         checks.push(models_endpoint_reachable(&fetch));
         checks.push(models_endpoint_shape(&fetch));
+    }
+    // L2.6 (mode-independent): with `LAST_VERIFIED` empty, any readable
+    // codex version is newer than what codexferry has verified against.
+    if let Some(c) = version_age(codex_version_output.as_deref()) {
+        checks.push(c);
     }
     checks.push(version_status(codex_version_output, state));
     checks
@@ -924,6 +934,39 @@ pub(crate) fn models_endpoint_shape(fetch: &ModelsFetch) -> Check {
     }
 }
 
+/// Spec L2.6: if the installed codex's normalized version is newer than any
+/// version codexferry has tested against, INFO "codex X is newer than the
+/// latest version codexferry has been verified against; run `codexferry doctor
+/// --live` to re-verify".
+///
+/// For now, the "latest verified" set is empty (we are at the first release
+/// that ships mode-aware doctor). Future codexferry releases extend it.
+const LAST_VERIFIED: &[&str] = &[];
+
+/// The version-age check (spec L2.6 of the 2026-08-23 design): an INFO when
+/// the installed codex has never been verified by codexferry — the first cut
+/// has an empty [`LAST_VERIFIED`] set, so every readable version qualifies.
+/// `None` when codex is absent or its `--version` output carries no digit
+/// token to normalize. Visibility only, never a FAIL.
+pub(crate) fn version_age(codex_version: Option<&str>) -> Option<Check> {
+    let Some(raw) = codex_version else { return None; };
+    let Some(cur) = crate::version::normalize_version(raw) else { return None; };
+    if LAST_VERIFIED.is_empty() {
+        return Some(Check::info(
+            "codex version age",
+            format!(
+                "{cur} has not been verified by codexferry doctor yet; run \
+                 `codexferry doctor --live` to establish a baseline"
+            ),
+        ));
+    }
+    // Parse semver-ish strings and compare; for now treat all as "newer".
+    Some(Check::info(
+        "codex version age",
+        format!("{cur} is newer than the latest codexferry-verified version; run `codexferry doctor --live`"),
+    ))
+}
+
 /// Version status vs the doctor state file (spec §3.2 of the 2026-08-22
 /// spec, carried into L1.5 of the 2026-08-23 design): visibility only,
 /// never a FAIL — an unverified codex is a reminder to run doctor.
@@ -1359,6 +1402,96 @@ base_url = "http://127.0.0.1:9999/v1"
 
     // ---- version_status ----
 
+    // ---- version_age (spec L2.6) ----
+
+    #[test]
+    fn version_age_skips_when_no_codex_version() {
+        assert!(version_age(None).is_none());
+    }
+
+    /// With `LAST_VERIFIED` empty, any installed codex — raw `codex --version`
+    /// output included — is unverified, so the INFO fires with the "not been
+    /// verified" wording.
+    #[test]
+    fn version_age_infos_when_version_has_not_been_verified() {
+        let c = version_age(Some("codex-cli 0.147.0")).expect("a check");
+        assert_eq!(c.name, "codex version age");
+        assert!(matches!(c.status, CheckStatus::Info), "{c:?}");
+        assert!(c.detail.contains("0.147.0"), "{c:?}");
+        assert!(c.detail.contains("not been verified"), "{c:?}");
+        assert!(c.detail.contains("doctor --live"), "{c:?}");
+    }
+
+    /// A version string with no digit token has nothing to normalize, so the
+    /// check is skipped instead of comparing garbage.
+    #[test]
+    fn version_age_skips_when_version_is_unparseable() {
+        assert!(version_age(Some("no digits here")).is_none());
+        assert!(version_age(Some("   ")).is_none());
+    }
+
+    /// Composition: the same dynamic-mode run, with and without a codex
+    /// version, gains/loses ONLY the version-age line — the other checks keep
+    /// their statuses. The with-version half is asserted thoroughly in
+    /// [`quick_checks_report_all_common_checks_in_a_wired_dynamic_environment`];
+    /// this test pins the without-version half and the ordering of the two
+    /// version lines (age before status).
+    #[test]
+    fn version_age_presence_follows_the_codex_version_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, port) = spawn_models_stub(200, &catalog_body(&["x/model-a"]));
+        let config_path = write_config_on_port(dir.path(), port);
+        let codex_toml = dynamic_codex_toml(&base);
+        let without = offline_checks_with_mode(
+            &config_path,
+            None,
+            Mode::Dynamic,
+            "codexferry",
+            Some(&codex_toml),
+            None,
+            &DoctorState::default(),
+        );
+        assert!(
+            without.iter().all(|c| c.name != "codex version age"),
+            "{without:?}"
+        );
+        let status = without
+            .iter()
+            .find(|c| c.name == "codex version status")
+            .expect("version status always present");
+        assert!(matches!(status.status, CheckStatus::Info), "{status:?}");
+
+        let with = offline_checks_with_mode(
+            &config_path,
+            None,
+            Mode::Dynamic,
+            "codexferry",
+            Some(&codex_toml),
+            Some("codex-cli 0.147.0".into()),
+            &DoctorState::default(),
+        );
+        assert_eq!(with.len(), without.len() + 1, "{without:?} {with:?}");
+        let age = with
+            .iter()
+            .find(|c| c.name == "codex version age")
+            .expect("version age present with a codex version");
+        assert!(matches!(age.status, CheckStatus::Info), "{age:?}");
+        let age_pos = with.iter().position(|c| c.name == "codex version age");
+        let status_pos = with.iter().position(|c| c.name == "codex version status");
+        assert!(age_pos < status_pos, "age must precede status in {with:?}");
+        // Every non-version check keeps the same name+status in both runs.
+        for c in &without {
+            if c.name == "codex version status" {
+                continue;
+            }
+            let w = with
+                .iter()
+                .find(|o| o.name == c.name)
+                .unwrap_or_else(|| panic!("check {:?} missing in {with:?}", c.name));
+            assert_eq!(w.status, c.status, "check {:?}", c.name);
+        }
+    }
+
     #[test]
     fn version_status_passes_only_on_green_match() {
         let green = DoctorState {
@@ -1441,7 +1574,7 @@ base_url = "http://127.0.0.1:9999/v1"
             &state,
         );
         assert!(!report_has_fail(&checks), "{checks:?}");
-        assert_eq!(checks.len(), 8, "{checks:?}");
+        assert_eq!(checks.len(), 9, "{checks:?}");
         for (name, want) in [
             ("config loads", CheckStatus::Pass),
             ("router has routes", CheckStatus::Pass),
@@ -1450,6 +1583,7 @@ base_url = "http://127.0.0.1:9999/v1"
             ("codex wiring", CheckStatus::Pass),
             ("models endpoint reachable", CheckStatus::Pass),
             ("models endpoint shape", CheckStatus::Pass),
+            ("codex version age", CheckStatus::Info),
             ("codex version status", CheckStatus::Pass),
         ] {
             let c = checks
