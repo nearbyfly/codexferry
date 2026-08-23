@@ -83,7 +83,10 @@ start_router() { # $1 config path — sets ROUTER_PORT/ROUTER_PID
   wait_healthz "http://127.0.0.1:$ROUTER_PORT"
 }
 
-# codex exec with the e2e provider baked in. Never touches ~/.codex or the
+# Dynamic-mode run (canonical): codex exec with the e2e provider baked in
+# via auth.command, no model_catalog_json pin — codex fetches the live
+# /v1/models catalog (run_codex_dynamic delegates here, so there is a
+# single dynamic wiring body). Never touches ~/.codex or the
 # resident router's config: CODEX_HOME is redirected into the artifact dir so
 # sessions/state stay out of the real ~/.codex (`-s read-only` only bounds the
 # workspace sandbox, not the CLI's own storage).
@@ -121,8 +124,10 @@ run_codex() { # args…: -m <route> "<prompt>"
     "$@" >"$ARTIFACT_DIR/codex-$(date +%s%N).log" 2>&1
 }
 
-# Resume the most recent session — Codex CLI 0.147's `exec resume` takes its
-# OWN -c/-m but NO -s/--sandbox short flag (parse-time exit 2), so unlike
+# Dynamic-mode resume: same command-auth wiring as run_codex (no
+# model_catalog_json pin), for `codex exec resume --last`. Codex CLI
+# 0.147's `exec resume` takes its OWN -c/-m but NO -s/--sandbox short flag
+# (parse-time exit 2), so unlike
 # run_codex it is invoked without -s. Without -s, resume silently inherits
 # the CLI default sandbox (`workspace-write`) with approvals never, which
 # would let a resumed tool command write unsandboxed; the
@@ -146,9 +151,10 @@ run_codex_resume() { # args…: -m <route> "<prompt>"
     "$@" >"$ARTIFACT_DIR/codex-resume-$(date +%s%N).log" 2>&1
 }
 
-# Static-mode wiring: env_key + a pre-generated model_catalog.json pin.
-# Under this wiring codex MUST NOT fetch /v1/models (env_key providers never
-# fetch, and the pin forces StaticModelsManager regardless of auth). The
+# Pinned-mode wiring (canonical static-mode helper): env_key + a
+# pre-generated model_catalog.json pin. Under this wiring codex MUST NOT
+# fetch /v1/models (env_key providers never fetch, and the pin forces
+# StaticModelsManager regardless of auth). The
 # catalog path is taken from $ARTIFACT_DIR/catalog.json by convention -
 # the scenario that calls this is responsible for generating the file with
 # `codexferry gen-catalog` before invoking run_codex_static. The path is
@@ -169,9 +175,9 @@ run_codex_static() { # args…: -m <route> "<prompt>"
     "$@" >"$ARTIFACT_DIR/codex-$(date +%s%N).log" 2>&1
 }
 
-# Static-mode resume: same env_key + model_catalog_json wiring as
-# run_codex_static, but for `codex exec resume --last`. Mirrors the
-# dynamic run_codex_resume shape (no -s short flag, restored via
+# Pinned-mode resume: same env_key + model_catalog_json wiring as
+# run_codex_static (pinned mode), but for `codex exec resume --last`.
+# Mirrors the dynamic run_codex_resume shape (no -s short flag, restored via
 # sandbox_mode override; the catalog pin stays absolute so resume sees
 # the same model metadata the original turn saw).
 run_codex_resume_static() { # args…: -m <route> "<prompt>"
@@ -184,6 +190,54 @@ run_codex_resume_static() { # args…: -m <route> "<prompt>"
     -c 'model_providers.e2e.wire_api="responses"' \
     -c 'model_providers.e2e.env_key="E2E_DUMMY_KEY"' \
     -c "model_catalog_json=\"$ARTIFACT_DIR/catalog.json\"" \
+    "$@" >"$ARTIFACT_DIR/codex-resume-$(date +%s%N).log" 2>&1
+}
+
+# Dynamic-mode run: auth command and NO model_catalog_json pin. Identical
+# wiring to run_codex (the canonical dynamic helper), so this delegates to
+# it — a single body, and the two names cannot diverge. Under this wiring
+# codex fetches the live /v1/models catalog from the router each session
+# start (OpenAiModelsManager, has_command_auth gate), so scenarios using it
+# can assert the codex-side live-fetch proof (assert_live_catalog_fetched).
+# Deliberately no env_key: an env_key-only provider never fetches, which
+# would silently turn the scenario into the degraded fallback path.
+run_codex_dynamic() { # args…: -m <route> "<prompt>"
+  run_codex "$@"
+}
+
+# Fallback-mode run: env_key only, NO model_catalog_json pin and NO auth
+# command. Under this wiring codex never fetches /v1/models and resolves
+# routes with degraded fallback metadata — the probe still tests the wire
+# shape, but the live-catalog discovery path is not exercised.
+run_codex_fallback() { # args…: -m <route> "<prompt>"
+  mkdir -p "$ARTIFACT_DIR/codex-home"
+  local sandbox_flags=(-s read-only)
+  if [ "${E2E_CODEX_SANDBOX:-read-only}" = bypass ]; then
+    sandbox_flags=(--dangerously-bypass-approvals-and-sandbox)
+  fi
+  CODEX_HOME="$ARTIFACT_DIR/codex-home" E2E_DUMMY_KEY=dummy codex exec "${sandbox_flags[@]}" --skip-git-repo-check \
+    -c 'model_provider="e2e"' \
+    -c 'model_providers.e2e.name="e2e"' \
+    -c "model_providers.e2e.base_url=\"http://127.0.0.1:${ROUTER_PORT}/v1\"" \
+    -c 'model_providers.e2e.wire_api="responses"' \
+    -c 'model_providers.e2e.env_key="E2E_DUMMY_KEY"' \
+    "$@" >"$ARTIFACT_DIR/codex-$(date +%s%N).log" 2>&1
+}
+
+# Fallback-mode resume: same env_key-only wiring as run_codex_fallback, but
+# for `codex exec resume --last`. Added by symmetry with
+# run_codex_resume_static (no -s short flag, sandbox restored via the
+# sandbox_mode override) so every mode has a first-turn + resume pair; no
+# current scenario uses it, but e2e-real.sh-style suites can pick it up.
+run_codex_resume_fallback() { # args…: -m <route> "<prompt>"
+  mkdir -p "$ARTIFACT_DIR/codex-home"
+  CODEX_HOME="$ARTIFACT_DIR/codex-home" E2E_DUMMY_KEY=dummy codex exec resume --last --skip-git-repo-check \
+    -c 'model_provider="e2e"' \
+    -c 'sandbox_mode="read-only"' \
+    -c 'model_providers.e2e.name="e2e"' \
+    -c "model_providers.e2e.base_url=\"http://127.0.0.1:${ROUTER_PORT}/v1\"" \
+    -c 'model_providers.e2e.wire_api="responses"' \
+    -c 'model_providers.e2e.env_key="E2E_DUMMY_KEY"' \
     "$@" >"$ARTIFACT_DIR/codex-resume-$(date +%s%N).log" 2>&1
 }
 
@@ -248,6 +302,32 @@ metrics_assert_absent() { # $1 router port, $2 substring
   local body
   body=$(curl -sf "http://127.0.0.1:$1/metrics") || fail "cannot scrape /metrics on $1"
   ! grep -qF "$2" <<<"$body" || fail "metrics unexpectedly contain: $2"
+}
+
+# Doctor offline quick-check runner (Task 10): scopes HOME to the artifact
+# doctor-home so `codexferry doctor` reads the scenario-supplied
+# ~/.codex/config.toml and never touches the user's real home. Stores the
+# captured report in DOCTOR_LAST_OUTPUT so scenarios can assert extra lines
+# after the common shape. `|| true` is required: a FAILing doctor exits 1 and
+# the script runs with `set -euo pipefail`.
+assert_doctor_offline_passes() { # $1 router-config-path, $2 expected-mode
+  local out
+  out=$(HOME="$ARTIFACT_DIR/doctor-home" "$REPO_ROOT/target/debug/codexferry" doctor --offline --config "$1" 2>&1 || true)
+  DOCTOR_LAST_OUTPUT=$out
+  grep -qF 'INFO: detected mode' <<<"$out" || fail "doctor output missing detected-mode INFO line (expected $2)"$'\n'"$out"
+  grep -qF "detected mode — $2 (" <<<"$out" || fail "doctor output detected a different mode than $2"$'\n'"$out"
+  ! grep -qF 'FAIL:' <<<"$out" || fail "doctor output has FAIL lines (expected mode $2)"$'\n'"$out"
+}
+
+# Same invocation as assert_doctor_offline_passes, but for scenarios that must
+# see a FAIL (currently unused; intended for future stale-pin scenarios).
+assert_doctor_offline_fails() { # $1 router-config-path, $2 expected-fail-substr
+  [ -n "${2:-}" ] || fail "expected-fail-substr is required"
+  local out
+  out=$(HOME="$ARTIFACT_DIR/doctor-home" "$REPO_ROOT/target/debug/codexferry" doctor --offline --config "$1" 2>&1 || true)
+  DOCTOR_LAST_OUTPUT=$out
+  grep -qF 'FAIL:' <<<"$out" || fail "doctor output has no FAIL line (expected: $2)"$'\n'"$out"
+  grep -qF "$2" <<<"$out" || fail "doctor output missing expected FAIL detail '$2'"$'\n'"$out"
 }
 
 cleanup_procs() {

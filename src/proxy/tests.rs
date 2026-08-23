@@ -61,6 +61,8 @@ context_window = 1000
         client,
         models: crate::models_cache::CatalogCache::new(),
         metrics: crate::metrics::Metrics::new(),
+        version_tracker: Arc::new(crate::version::CodexVersionTracker::new()),
+        doctor_state_path: crate::version::state_path(),
     });
 
     Router::new()
@@ -133,6 +135,30 @@ async fn models_catalog_shape_with_client_version_and_304() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 304);
+}
+
+/// Pin the "unverified on any `None`" half of the doctor tripwire: two
+/// values that both fail normalization must NOT compare equal and report a
+/// false green (spec §3.2). Mirrors the archived
+/// `doctor_verified_never_treats_two_unparseables_as_equal`.
+#[test]
+fn doctor_verified_never_treats_two_unparseables_as_equal() {
+    // Both sides unnormalizable: must NOT be verified.
+    assert!(!version_is_doctor_verified(None, Some("no digits here")));
+    assert!(!version_is_doctor_verified(None, None));
+    // One side missing: still unverified.
+    assert!(!version_is_doctor_verified(Some("0.1.0"), None));
+    assert!(!version_is_doctor_verified(None, Some("0.1.0")));
+    // Genuine match, including across the `codex-cli X` prefix form.
+    assert!(version_is_doctor_verified(
+        Some("0.158.0"),
+        Some("codex-cli 0.158.0")
+    ));
+    // Genuine mismatch.
+    assert!(!version_is_doctor_verified(
+        Some("0.158.0"),
+        Some("0.157.0")
+    ));
 }
 
 #[test]

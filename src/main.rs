@@ -13,10 +13,11 @@
 //!   Codex `model_catalog_json` file (see [`catalog::run_gen_catalog`]) so
 //!   the Codex TUI knows about the proxy's `provider/alias` models.
 //! * **`doctor` subcommand** — contract health check (upgrade tripwire):
-//!   offline it regenerates the catalog in memory and deep-compares it with
-//!   the installed one, reporting drift as FAIL; `--live` additionally
-//!   drives the installed Codex CLI through a temporary router (see
-//!   [`doctor::run_doctor`]).
+//!   the default composes the L1 + L2 quick checks (config loads, router
+//!   routes, template dropped-field tripwire, mode classification, Codex
+//!   wiring, version status) with the L3 live probe into ONE report whenever
+//!   the Codex CLI is available; `--offline` runs L1 + L2 only (fast path)
+//!   and `--live` runs the L3 probe only (see [`doctor::run_doctor`]).
 //!
 //! Logging is initialized lazily inside [`proxy::run`] (see `logging.rs`).
 //! The `gen-catalog` path also installs a tracing subscriber — Once-guarded
@@ -38,12 +39,14 @@ mod doctor_live;
 mod heal;
 mod logging;
 mod metrics;
+mod mode;
 mod models_cache;
 mod normalize;
 mod proxy;
 mod quirks;
 mod session;
 mod upstream;
+mod version;
 mod wire;
 
 use clap::{Parser, Subcommand};
@@ -99,17 +102,18 @@ enum Commands {
 
     /// Check router ↔ Codex contract health (upgrade tripwire).
     ///
-    /// Offline mode (default) verifies the installed model catalog matches a
-    /// fresh regeneration. `--live` additionally drives the installed Codex
-    /// CLI through a temporary in-process router + mock upstream and asserts
-    /// the normalized wire shape and a full tool round-trip.
+    /// Default: L1 + L2 quick checks followed by the L3 live probe, printed
+    /// as one combined report. `--offline`: L1 + L2 only (fast checks
+    /// without codex). `--live`: L3 probe only — overrides `--offline`, and
+    /// exits 2 when codex is missing or unrunnable.
     Doctor {
         /// Path to the router TOML config (defaults to CODEXFERRY_CONFIG
         /// or ./cxf.toml, same rule as the server).
         #[arg(long)]
         config: Option<PathBuf>,
-        /// Path to the installed catalog JSON
-        /// (defaults to ~/.codex/codexferry-catalog.json).
+        /// Path to the installed catalog JSON (accepted for compatibility
+        /// with older invocations; ignored — the offline checks no longer
+        /// compare against an installed catalog).
         #[arg(long)]
         catalog: Option<PathBuf>,
         /// Optional explicit path to a Codex `models.json` template to
@@ -118,9 +122,12 @@ enum Commands {
         /// automatically (see `catalog::load_template`).
         #[arg(long)]
         codex_models: Option<PathBuf>,
-        /// Run the live wire-shape + tool round-trip probe.
+        /// Run the live wire-shape + tool round-trip probe; overrides `--offline`.
         #[arg(long)]
         live: bool,
+        /// Skip live probes (L1 + L2 only). Useful for fast checks without codex.
+        #[arg(long)]
+        offline: bool,
     },
 }
 
@@ -129,8 +136,9 @@ enum Commands {
 /// Parses the CLI arguments and dispatches:
 /// * `Some(Commands::GenCatalog { .. })` → offline catalog generation
 ///   (`catalog::run_gen_catalog`), then exit.
-/// * `Some(Commands::Doctor { .. })` → offline/live contract health check
-///   (`doctor::run_doctor`), then exit (exit code 1 on any FAIL).
+/// * `Some(Commands::Doctor { .. })` → contract health check
+///   (`doctor::run_doctor`), then exit (exit code 1 on any FAIL; exit 2
+///   only via the live path's environment gate).
 /// * `None` → the long-running proxy server (`proxy::run`), which blocks
 ///   until a shutdown signal (SIGINT/SIGTERM) is received.
 ///
@@ -150,17 +158,13 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(Commands::Doctor {
             config,
-            catalog,
+            catalog: _,
             codex_models,
             live,
+            offline,
         }) => {
             let config_path = config.unwrap_or_else(crate::config::default_config_path);
-            doctor::run_doctor(
-                &config_path,
-                catalog.as_deref(),
-                codex_models.as_deref(),
-                live,
-            )?;
+            doctor::run_doctor(&config_path, codex_models.as_deref(), live, offline)?;
         }
         None => {
             // Server mode: init logging, load config, spawn watcher, serve.

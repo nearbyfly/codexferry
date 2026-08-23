@@ -329,44 +329,50 @@ codexferry/
 ├── BUILD.md                # Build, test, and e2e commands (split out of README)
 ├── README.md               # User guide (usage + static/dynamic catalog intro)
 ├── scripts/
-│   ├── e2e-lib.sh           # E2E shared helpers: sandbox selection + run_codex (215)
-│   ├── e2e.sh               # deterministic E2E layer: basic/models/tools/multiturn (199)
-│   ├── e2e-real.sh          # opt-in real-provider smoke; refuses sandbox bypass (97)
+│   ├── e2e-lib.sh           # E2E shared helpers: sandbox selection + run_codex + doctor assertions (336)
+│   ├── e2e.sh               # deterministic E2E layer: basic/models/tools/multiturn + doctor scenarios (443)
+│   ├── e2e-real.sh          # opt-in real-provider smoke; refuses sandbox bypass (140)
 │   ├── codex-config-dynamic.toml.example  # Codex CLI side: live /models catalog via auth.command (47)
 │   └── codex-config-static.toml.example   # Codex CLI side: pinned gen-catalog file (34)
 ├── docs/superpowers/
-│   └── specs/              # Migration spec (the original design spec and plan
-│                           #   live in the retained codex-router-rs repo)
+│   └── specs/              # spec docs (migration design + doctor designs; the
+│                           #   original codex-router-rs design spec and plan
+│                           #   live in the retained repo)
 ├── src/
-│   ├── main.rs             # CLI entry (clap) (171 lines)
+│   ├── main.rs             # CLI entry (clap) (175)
 │   ├── bin/
-│   │   └── e2e-mock.rs     # scripted mock upstream for the E2E scripts (354)
-│   ├── config.rs           # TOML types + validation + hot reload (954)
-│   ├── doctor.rs           # doctor subcommand: offline drift check + report (315)
-│   ├── doctor_live.rs      # doctor --live: mock upstream + wire-shape probe (808)
+│   │   └── e2e-mock.rs     # scripted mock upstream for the E2E scripts (382)
+│   ├── config.rs           # TOML types + validation + hot reload (1,047)
+│   ├── doctor.rs           # doctor: mode-aware offline quick-checks (L1 config/wiring/mode/version status + L2.6 version age, mode-keyed advisories, pinned L2.7–L2.10 pin checks, dynamic L2.7' pin-shadow WARN + L2.8'/L2.9' endpoint smoke/shape) + WARN/INFO/FAIL report/exit codes (2,502)
+│   ├── doctor_live.rs      # doctor --live: mode-aware L3 live probe (wiring mirrors the detected mode; live-catalog-fetch proof) — returns checks (1,241)
+│   ├── mode.rs             # codex wiring mode detection: pinned/dynamic/fallback (191)
+│   ├── version.rs          # codex client-version tripwire (`CodexVersionTracker`) + doctor state (383)
 │   ├── proxy/
-│   │   ├── mod.rs             # axum routing + dispatch (660)
+│   │   ├── mod.rs             # axum routing + dispatch + client-version observation (736)
 │   │   ├── chat.rs            # chat-format handler (515)
 │   │   ├── passthrough.rs     # responses-format relay (472)
 │   │   ├── upstream.rs        # send_upstream + error-class dedup helpers (150)
 │   │   ├── capture.rs         # session/usage capture (164)
 │   │   │   └── tests.rs       # capture unit tests (178)
-│   │   ├── tests.rs           # unit tests (227)
-│   │   └── metrics_route_tests.rs  # metrics route unit tests (42)
+│   │   ├── tests.rs           # unit tests (252)
+│   │   └── metrics_route_tests.rs  # metrics route unit tests (43)
 │   ├── quirks.rs           # quirk names + GLM matcher (63)
 │   ├── heal/
 │   │   ├── mod.rs           # HealGates + facade re-exports (63)
 │   │   ├── think.rs         # think-tag healing (192)
+│   │   ├── think_tests.rs   # think-tag healing unit tests (152)
 │   │   ├── dsml.rs          # DSML tool-call healing (677)
+│   │   ├── dsml_tests.rs    # DSML healing unit tests (386)
 │   │   ├── responses.rs     # Responses passthrough healer (611)
-│   │   └── (tests: heal/{think,dsml,responses_healer}_tests.rs)
+│   │   └── responses_healer_tests.rs  # responses healer unit tests (496)
 │   ├── session.rs          # SessionStore (340)
 │   ├── upstream.rs         # SSE parser + key resolution (623)
-│   ├── catalog.rs          # gen-catalog (861)
+│   ├── catalog.rs          # gen-catalog + build_catalog_value (861)
+│   ├── models_cache.rs     # CatalogCache: route-fingerprint + template-mtime invalidation for live /models (246)
 │   ├── logging.rs          # tracing init (36)
-│   ├── metrics.rs          # Prometheus metrics registry, label types, error classification, recording methods (369)
+│   ├── metrics.rs          # Prometheus metrics registry + /metrics encoding (369)
 │   ├── normalize.rs        # boundary normalization (hoist, namespace flatten + chat-name encode/decode map, unknown-type visibility) (452)
-│   │   └── (tests: normalize/tests.rs)
+│   │   └── tests.rs        # normalization unit tests (446)
 │   ├── wire/
 │   │   ├── mod.rs          # wire types module (28)
 │   │   ├── responses.rs    # Responses API types (132)
@@ -374,12 +380,12 @@ codexferry/
 │   └── convert/
 │       ├── mod.rs          # conversion module (23)
 │       ├── request.rs      # Responses → Chat, incl. namespace tool encode on replay (613)
-│       │   └── (tests: convert/request/tests.rs)
+│       │   └── tests.rs    # request conversion unit tests (637)
 │       ├── response.rs     # Chat → Responses, incl. namespace decode (881)
-│       │   ├── (tests: convert/response/stream_tests.rs)
-│       │   └── (tests: convert/response/tests.rs)
+│       │   ├── stream_tests.rs  # stream conversion unit tests (1,045)
+│       │   └── tests.rs   # response conversion unit tests (217)
 └── tests/
-    ├── common/mod.rs         # shared harness (~1,118)
+    ├── common/mod.rs         # shared harness (1,118)
     ├── chat_conversion.rs    # chat-path conversion tests (691)
     ├── passthrough.rs        # responses-format relay tests (438)
     ├── healing.rs            # dsml/think leak healing tests (352)
@@ -390,4 +396,6 @@ codexferry/
 > Line counts are approximate and include comments; they drift as the code evolves.
 > Update them when making significant changes.
 
-~18,748 lines total. 314 tests (273 unit + 5 e2e-mock unit + 35 integration + 1 ignored).
+~22,636 lines total across the scripts/, src/ and tests/ files above. 411 tests
+(370 unit + 5 e2e-mock unit + 35 integration passing + 1 ignored live-probe
+test).

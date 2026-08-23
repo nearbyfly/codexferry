@@ -15,8 +15,24 @@
 //! finds nothing and the probe fails loudly instead of leaking markup.
 //! The tool call touches a sentinel file, proving the full round-trip
 //! (model → router → codex → local execution → tool output back upstream).
+//!
+//! The probe wiring mirrors the user's ACTUAL codex mode (spec
+//! 2026-08-23 §Mode detection): `run()` reads `~/.codex/config.toml` and
+//! dispatches on [`crate::mode::Mode`] — dynamic uses an `auth.command`
+//! (codex fetches `/v1/models` live from the in-process router), pinned
+//! pins the generated catalog, fallback (env_key only, no pin) is the
+//! degraded metadata path. The live-fetch assertion is the codex-side
+//! equivalent of the spec's router-log line: `models_cache.json` appears
+//! in codex's CODEX_HOME only after a successful `/v1/models` fetch.
+//!
+//! `run()` collects the probe checks and RETURNS them — it does not print
+//! the report or decide the exit code. `doctor::run_doctor` prints the
+//! (standalone or combined) report and exits 1 on any FAIL. The
+//! codex-missing environment gate is the one exception: it prints the
+//! environment line and exits 2 here, preserving the `--live` contract.
 
-use crate::doctor::{print_report, report_has_fail, Check};
+use crate::doctor::Check;
+use crate::mode::{self, Mode};
 use axum::routing::post;
 use axum::Router;
 use serde_json::{json, Value};
@@ -27,12 +43,24 @@ use std::sync::{Arc, Mutex};
 // source of truth (shared with the request-side visibility warns).
 use crate::normalize::KNOWN_INPUT_ITEM_TYPES;
 
-/// Live-probe entry point: runs both routes, prints the report, exits 1/2.
+/// Live-probe entry point: runs both routes and returns the collected
+/// checks. The caller ([`crate::doctor::run_doctor`]) prints the report
+/// and decides the exit code (0 all pass / 1 any FAIL).
 ///
-/// The `config_path` argument is intentionally unused: the probe is
-/// self-contained (temp workspace + temp config pointing at the mock), so
-/// the user's own config never matters here.
-pub fn run(_config_path: &Path) -> anyhow::Result<()> {
+/// Detects the user's wiring mode from `~/.codex/config.toml` (spec
+/// 2026-08-23 §Mode detection) and threads it into the probe so the probe
+/// tests what the user actually runs. Dynamic mode uses an auth command and
+/// no pin (codex fetches `/v1/models` live); pinned mode pins the generated
+/// temp catalog; fallback uses env_key only and is the degraded path. The
+/// `config_path` argument — codexferry's own config — stays unused by the
+/// probe itself (it generates its own temp router config), but the probe
+/// wiring now depends on the real `~/.codex/config.toml` via the detected
+/// mode.
+///
+/// Environment gate: when codex is missing or unrunnable this function
+/// prints the environment line and exits 2 itself — the only exit it owns
+/// (the `--live` env-gate contract).
+pub fn run(_config_path: &Path) -> anyhow::Result<Vec<Check>> {
     // TODO(spec §3.2 item 6): on failure print last 20 lines of router log.
     // The in-process router installs no tracing subscriber → no router logs.
     //
@@ -50,28 +78,62 @@ pub fn run(_config_path: &Path) -> anyhow::Result<()> {
         eprintln!("environment: `codex` not found or not runnable on PATH (doctor --live needs the Codex CLI)");
         std::process::exit(2);
     }
+    // Resolve the user's actual mode (spec §Mode detection) from the raw
+    // config text; a missing or unparseable `~/.codex/config.toml` degrades
+    // to `Mode::Fallback`, so the live probe still runs, only with the
+    // degraded wiring (see [`detect_active_mode`]).
+    let codex_toml = std::fs::read_to_string(default_codex_config_path()).ok();
+    let mode = detect_active_mode(codex_toml.as_deref());
     // `main` is `#[tokio::main]`, so the calling thread is already inside a
     // tokio runtime; a nested `Runtime::new()` would panic with "Cannot
     // start a runtime from within a runtime". Run the probe on a fresh OS
     // thread with its own runtime instead — the probe is fully
     // self-contained (own mock server, router, client).
-    let probe = std::thread::spawn(|| {
+    let probe = std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new()?;
-        rt.block_on(probe_both_routes())
+        rt.block_on(probe_both_routes(mode))
     });
     let checks = match probe.join() {
         Ok(Ok(checks)) => checks,
         Ok(Err(e)) => return Err(e),
         Err(_) => anyhow::bail!("doctor --live probe thread panicked"),
     };
-    print_report(&checks);
-    if report_has_fail(&checks) {
-        std::process::exit(1);
-    }
-    Ok(())
+    Ok(checks)
 }
 
-async fn probe_both_routes() -> anyhow::Result<Vec<Check>> {
+/// Resolve the active provider and wiring mode from raw codex config text
+/// (injected, so `run()`'s mode resolution stays unit-testable without
+/// touching `~/.codex` or spawning codex). The active provider is the
+/// top-level `model_provider`, default
+/// [`crate::mode::DEFAULT_ACTIVE_PROVIDER`]; missing text and TOML parse
+/// failures degrade to `Mode::Fallback` via
+/// [`crate::mode::detect_mode`].
+fn detect_active_mode(codex_toml: Option<&str>) -> Mode {
+    let active_provider = codex_toml
+        .and_then(|text| text.parse::<toml::Value>().ok())
+        .and_then(|val| {
+            val.get("model_provider")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| mode::DEFAULT_ACTIVE_PROVIDER.to_string());
+    mode::detect_mode(codex_toml, &active_provider)
+}
+
+/// Default Codex config location: `$HOME/.codex/config.toml`. Same home
+/// resolution rule as `doctor.rs`: `HOME`, falling back to `USERPROFILE`
+/// on Windows.
+fn default_codex_config_path() -> PathBuf {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_default();
+    PathBuf::from(home).join(".codex").join("config.toml")
+}
+
+/// Run both probe routes (responses passthrough + chat conversion)
+/// against the mode-appropriate wiring, collecting the shape/round-trip
+/// checks plus the codex-side live-catalog-fetch proof for each route.
+async fn probe_both_routes(mode: Mode) -> anyhow::Result<Vec<Check>> {
     println!("[1/6] preparing temp workspace");
     let dir = tempfile::tempdir()?;
     let sentinel_dir = dir.path().to_path_buf();
@@ -162,10 +224,11 @@ timeout_ms = 60000
         let sentinel = sentinel_dir.join(format!("sentinel-{endpoint}.touched"));
         let _ = std::fs::remove_file(&sentinel);
         let outcome =
-            run_codex_probe_with_deadline(route, &catalog_path, router_port, CODEX_PROMPT);
+            run_codex_probe_with_deadline(mode, route, &catalog_path, router_port, CODEX_PROMPT);
         checks.extend(shape_checks(&mock, endpoint, "doctor-upstream"));
         checks.push(sentinel_check(&sentinel));
         checks.push(exit_check(&outcome));
+        checks.push(live_catalog_check(mode, &outcome));
     }
 
     println!("[6/6] shutting down");
@@ -409,11 +472,21 @@ fn chat_text_sse(text: &str) -> String {
 struct ProbeOutcome {
     success: bool,
     stderr_tail: String,
+    /// Whether codex wrote `models_cache.json` in its probe CODEX_HOME —
+    /// the codex-side live-catalog fetch proof (false on timeout, where the
+    /// child may still be running and the cache may appear later).
+    models_cache_fetched: bool,
+    /// Slugs parsed from the probe's `models_cache.json`
+    /// ([`read_cached_slugs`]); empty when the cache is absent or
+    /// unparseable. The dynamic live-catalog check requires the two probe
+    /// route slugs to be present here.
+    cached_slugs: Vec<String>,
 }
 
 /// Run one `codex exec` probe on a blocking thread with a 90s deadline
 /// (codex startup + two rounds); a timeout yields a failed outcome instead
-/// of hanging the report.
+/// of hanging the report. `mode` selects the probe's auth/catalog wiring
+/// (spec 2026-08-23 §Mode detection).
 ///
 /// DELIBERATE DEVIATION from spec §3.2 ("kill the process group on
 /// timeout"): on a 90s timeout the spawned `codex exec` process is NOT
@@ -421,6 +494,7 @@ struct ProbeOutcome {
 /// path also intentionally leaves that probe's CODEX_HOME in place — the
 /// child may still be running and needs the directory to exist.
 fn run_codex_probe_with_deadline(
+    mode: Mode,
     route: &str,
     catalog_path: &Path,
     router_port: u16,
@@ -430,18 +504,38 @@ fn run_codex_probe_with_deadline(
     let route = route.to_string();
     let catalog_path = catalog_path.to_path_buf();
     std::thread::spawn(move || {
-        let _ = tx.send(run_codex_probe(&route, &catalog_path, router_port, prompt));
+        let _ = tx.send(run_codex_probe(
+            mode,
+            &route,
+            &catalog_path,
+            router_port,
+            prompt,
+        ));
     });
     match rx.recv_timeout(std::time::Duration::from_secs(90)) {
         Ok(outcome) => outcome,
         Err(_) => ProbeOutcome {
             success: false,
             stderr_tail: "codex probe timed out after 90s".into(),
+            models_cache_fetched: false,
+            cached_slugs: Vec::new(),
         },
     }
 }
 
+/// Run one `codex exec` probe against the in-process router with
+/// mode-appropriate wiring: dynamic uses an `auth.command` (codex fetches
+/// `/v1/models` live, no pin), pinned uses env_key + the generated catalog
+/// pin, fallback uses env_key only (no pin — degraded metadata path).
+/// Everything else is identical across modes: base_url, wire_api=responses,
+/// approval_policy=never, sandbox_mode=danger-full-access,
+/// model_reasoning_effort=low, `-m route`, prompt, scratch CODEX_HOME and
+/// the `DOCTOR_CODEX_KEY=dummy` env (the router does not authenticate
+/// clients; the dummy key satisfies codex's env_key auth). The returned
+/// outcome also carries the live-fetch proof (cache existence + slug set)
+/// captured before CODEX_HOME is reclaimed.
 fn run_codex_probe(
+    mode: Mode,
     route: &str,
     catalog_path: &Path,
     router_port: u16,
@@ -449,8 +543,11 @@ fn run_codex_probe(
 ) -> ProbeOutcome {
     let home = std::env::temp_dir().join(format!("doctor-home-{}", uuid::Uuid::new_v4().simple()));
     std::fs::create_dir_all(&home).unwrap();
-    let output = std::process::Command::new("codex")
-        .arg("exec")
+    // The live-fetch proof artifact is captured before CODEX_HOME is
+    // reclaimed (see the capture below), so the returned outcome records
+    // both the cache presence and the slug set.
+    let mut cmd = std::process::Command::new("codex");
+    cmd.arg("exec")
         .arg("--skip-git-repo-check")
         .arg("-c")
         .arg("model_provider=doctor")
@@ -461,12 +558,29 @@ fn run_codex_probe(
             "model_providers.doctor.base_url=http://127.0.0.1:{router_port}/v1"
         ))
         .arg("-c")
-        .arg("model_providers.doctor.env_key=DOCTOR_CODEX_KEY")
-        .arg("-c")
-        .arg("model_providers.doctor.wire_api=responses")
-        .arg("-c")
-        .arg(format!("model_catalog_json={}", catalog_path.display()))
-        .arg("-c")
+        .arg("model_providers.doctor.wire_api=responses");
+    // Mode-aware auth/catalog wiring (spec §Mode detection): dynamic uses
+    // an auth command so codex's OpenAiModelsManager fetches the live
+    // catalog (no pin); pinned couples env_key with the generated temp
+    // catalog pin (StaticModelsManager); fallback is env_key-only (no pin —
+    // degraded metadata path, never fetches).
+    match mode {
+        Mode::Dynamic => {
+            cmd.arg("-c")
+                .arg("model_providers.doctor.auth={command=\"echo\",args=[\"dummy\"]}");
+        }
+        Mode::Pinned => {
+            cmd.arg("-c")
+                .arg("model_providers.doctor.env_key=DOCTOR_CODEX_KEY");
+            cmd.arg("-c")
+                .arg(format!("model_catalog_json={}", catalog_path.display()));
+        }
+        Mode::Fallback => {
+            cmd.arg("-c")
+                .arg("model_providers.doctor.env_key=DOCTOR_CODEX_KEY");
+        }
+    }
+    cmd.arg("-c")
         .arg("approval_policy=never")
         .arg("-c")
         .arg("sandbox_mode=danger-full-access")
@@ -477,25 +591,132 @@ fn run_codex_probe(
         .arg(prompt)
         .env("CODEX_HOME", &home)
         .env("DOCTOR_CODEX_KEY", "dummy")
-        .stdin(std::process::Stdio::null())
-        .output();
+        .stdin(std::process::Stdio::null());
+    let output = cmd.output();
     // This function only runs on the non-timeout path (a 90s deadline
     // timeout returns from `run_codex_probe_with_deadline` without
     // consuming this result), so codex has fully exited here and CODEX_HOME
     // is no longer in use — reclaim the per-probe home. The timeout path
     // intentionally leaves the dir behind: codex may still be running and
     // needs its CODEX_HOME to exist.
+    // Record the live-catalog fetch proof BEFORE reclaiming the home:
+    // codex writes `models_cache.json` only after a successful `/v1/models`
+    // fetch, so its presence is the codex-side equivalent of the spec's
+    // router-log `codex client X detected` assertion (the in-process router
+    // installs no tracing subscriber, so no router log exists to assert).
+    // The slug set is captured too, mirroring
+    // `scripts/e2e-lib.sh::assert_live_catalog_fetched`: the dynamic check
+    // only passes when the cached catalog actually contains the probe's
+    // two route slugs.
+    let cache_path = home.join("models_cache.json");
+    let models_cache_fetched = cache_path.exists();
+    let cached_slugs = read_cached_slugs(&cache_path);
     let _ = std::fs::remove_dir_all(&home);
     match output {
         Ok(out) => ProbeOutcome {
             success: out.status.success(),
             stderr_tail: tail(&String::from_utf8_lossy(&out.stderr), 1200),
+            models_cache_fetched,
+            cached_slugs,
         },
         Err(e) => ProbeOutcome {
             success: false,
             stderr_tail: format!("failed to spawn codex: {e}"),
+            models_cache_fetched,
+            cached_slugs,
         },
     }
+}
+
+/// The two route slugs every probe run expects from the in-process router's
+/// `/v1/models`; the dynamic live-catalog check requires both in codex's
+/// cached catalog (mirror of
+/// `scripts/e2e-lib.sh::assert_live_catalog_fetched`).
+const PROBE_CATALOG_SLUGS: [&str; 2] = ["doctor/resp", "doctorchat/chat"];
+
+/// Codex-side live-catalog fetch proof for one probe (spec L3 assertion,
+/// adapted to this in-process topology). Dynamic mode MUST fetch the live
+/// catalog AND see both probe route slugs in it — a missing cache means the
+/// `/v1/models` fetch never happened, a cache missing a slug means it
+/// returned a truncated/incorrect catalog. Pinned/fallback modes must NOT
+/// fetch — a present cache means codex fetched despite the env_key-only/
+/// pinned wiring (an anomaly; inspect the user's config for a stray
+/// `auth.command`).
+fn live_catalog_check(mode: Mode, outcome: &ProbeOutcome) -> Check {
+    match mode {
+        Mode::Dynamic => {
+            if !outcome.models_cache_fetched {
+                Check::fail(
+                    "live catalog fetched",
+                    "the dynamic-mode /v1/models fetch is broken — codex never wrote \
+                     its models_cache.json; check models_cache.rs::CatalogCache::get \
+                     / the router",
+                )
+            } else {
+                let missing: Vec<&str> = PROBE_CATALOG_SLUGS
+                    .iter()
+                    .copied()
+                    .filter(|slug| !outcome.cached_slugs.iter().any(|s| s == slug))
+                    .collect();
+                if missing.is_empty() {
+                    Check::pass(
+                        "live catalog fetched",
+                        format!(
+                            "codex wrote its models_cache.json with both probe slugs ({})",
+                            PROBE_CATALOG_SLUGS.join(", ")
+                        ),
+                    )
+                } else {
+                    Check::fail(
+                        "live catalog fetched",
+                        format!(
+                            "dynamic-mode /v1/models fetch returned a catalog missing \
+                             slug(s) {} — check models_cache.rs::CatalogCache::get \
+                             / the router",
+                            missing.join(", ")
+                        ),
+                    )
+                }
+            }
+        }
+        Mode::Pinned | Mode::Fallback => {
+            if outcome.models_cache_fetched {
+                Check::fail(
+                    "no live catalog fetch (pinned/fallback wiring)",
+                    "codex fetched /v1/models despite the wiring — inspect \
+                     the config for a stray auth.command",
+                )
+            } else {
+                Check::pass(
+                    "no live catalog fetch (pinned/fallback wiring)",
+                    "codex never fetched /v1/models (intended)",
+                )
+            }
+        }
+    }
+}
+
+/// Parse the slugs from a codex `models_cache.json` (empty when the file is
+/// absent or unparseable). Only the `models[].slug` strings are needed —
+/// the value-level mirror of `scripts/e2e-lib.sh::assert_live_catalog_fetched`,
+/// which checks the same slugs at the e2e layer.
+fn read_cached_slugs(path: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(val) = serde_json::from_str::<Value>(&text) else {
+        return Vec::new();
+    };
+    val.get("models")
+        .and_then(Value::as_array)
+        .map(|models| {
+            models
+                .iter()
+                .filter_map(|m| m.get("slug").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Last `n` characters of `s` (diagnostic tails keep the end, where the
@@ -691,6 +912,218 @@ fn free_port() -> u16 {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // ---- mode resolution (pure wrapper around detec_mode) ----
+
+    #[test]
+    fn detect_active_mode_missing_or_unparseable_is_fallback() {
+        // `run()` feeds the raw file text through this wrapper; a missing
+        // or unparseable `~/.codex/config.toml` must degrade to Fallback
+        // (consistent with `crate::mode::detect_mode`) so the live probe
+        // still runs with the degraded wiring.
+        assert_eq!(detect_active_mode(None), Mode::Fallback);
+        assert_eq!(
+            detect_active_mode(Some("not valid toml [[[")),
+            Mode::Fallback
+        );
+    }
+
+    #[test]
+    fn detect_active_mode_follows_model_provider_selection() {
+        let toml = r#"
+            model = "x/y"
+            model_provider = "alt"
+            [model_providers.codexferry]
+            base_url = "http://127.0.0.1:8787/v1"
+            env_key = "DUMMY"
+            [model_providers.alt]
+            base_url = "http://127.0.0.1:8787/v1"
+            [model_providers.alt.auth]
+            command = "echo"
+            args = ["dummy"]
+        "#;
+        // `alt` has auth.command; `codexferry` is env_key-only. The active
+        // provider (top-level `model_provider`) must be honored, so this is
+        // Dynamic — not the Fallback the default provider would give.
+        assert_eq!(detect_active_mode(Some(toml)), Mode::Dynamic);
+    }
+
+    #[test]
+    fn detect_active_mode_defaults_to_codexferry() {
+        // No top-level `model_provider`: the DEFAULT_ACTIVE_PROVIDER table
+        // decides, and env_key-only wiring is Fallback.
+        let fallback = r#"
+            model = "x/y"
+            [model_providers.codexferry]
+            base_url = "http://127.0.0.1:8787/v1"
+            env_key = "DUMMY"
+        "#;
+        assert_eq!(detect_active_mode(Some(fallback)), Mode::Fallback);
+        // The same default provider with a pin is Pinned.
+        let pinned = r#"
+            model_catalog_json = "/tmp/catalog.json"
+            [model_providers.codexferry]
+            base_url = "http://127.0.0.1:8787/v1"
+        "#;
+        assert_eq!(detect_active_mode(Some(pinned)), Mode::Pinned);
+    }
+
+    // ---- live-catalog check (mode-aware L3 assertion) ----
+
+    /// Probe outcome with only the live-catalog parts set (`success` and
+    /// `stderr_tail` are irrelevant to `live_catalog_check`).
+    fn outcome_with_cache(cache: bool, slugs: &[&str]) -> ProbeOutcome {
+        ProbeOutcome {
+            success: true,
+            stderr_tail: String::new(),
+            models_cache_fetched: cache,
+            cached_slugs: slugs.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn dynamic_with_fresh_cache_and_both_slugs_passes() {
+        let check = live_catalog_check(
+            Mode::Dynamic,
+            &outcome_with_cache(true, &["doctor/resp", "doctorchat/chat"]),
+        );
+        assert_eq!(check.status, crate::doctor::CheckStatus::Pass);
+        assert_eq!(check.name, "live catalog fetched");
+        assert_eq!(
+            check.detail,
+            "codex wrote its models_cache.json with both probe slugs (doctor/resp, doctorchat/chat)"
+        );
+    }
+
+    #[test]
+    fn dynamic_without_cache_fails_naming_catalog_cache() {
+        let check = live_catalog_check(Mode::Dynamic, &outcome_with_cache(false, &[]));
+        assert_eq!(check.status, crate::doctor::CheckStatus::Fail);
+        assert_eq!(check.name, "live catalog fetched");
+        assert!(
+            check.detail.contains("CatalogCache"),
+            "detail should name the catalog-cache remediation: {}",
+            check.detail
+        );
+        assert!(
+            check.detail.contains("never wrote"),
+            "detail should distinguish missing cache from missing slug: {}",
+            check.detail
+        );
+    }
+
+    #[test]
+    fn dynamic_cache_missing_a_probe_slug_fails() {
+        // A cache that exists but lacks one (or both) probe slugs must FAIL
+        // with the missing-slug wording — the truncated-catalog case.
+        for slugs in [
+            &["doctor/resp"][..],
+            &["doctorchat/chat"][..],
+            &["unrelated/route"][..],
+        ] {
+            let check = live_catalog_check(Mode::Dynamic, &outcome_with_cache(true, slugs));
+            assert_eq!(check.status, crate::doctor::CheckStatus::Fail);
+            assert_eq!(check.name, "live catalog fetched");
+            assert!(
+                check.detail.contains("missing slug(s)"),
+                "detail should name the missing slug: {}",
+                check.detail
+            );
+        }
+    }
+
+    #[test]
+    fn pinned_or_fallback_with_cache_fails_on_stray_auth_command() {
+        for mode in [Mode::Pinned, Mode::Fallback] {
+            let check = live_catalog_check(
+                mode,
+                &outcome_with_cache(true, &["doctor/resp", "doctorchat/chat"]),
+            );
+            assert_eq!(check.status, crate::doctor::CheckStatus::Fail);
+            assert_eq!(check.name, "no live catalog fetch (pinned/fallback wiring)");
+            assert!(
+                check.detail.contains("stray auth.command"),
+                "detail should point at the stray auth.command: {}",
+                check.detail
+            );
+        }
+    }
+
+    #[test]
+    fn pinned_or_fallback_without_cache_passes() {
+        for mode in [Mode::Pinned, Mode::Fallback] {
+            let check = live_catalog_check(mode, &outcome_with_cache(false, &[]));
+            assert_eq!(check.status, crate::doctor::CheckStatus::Pass);
+            assert_eq!(check.name, "no live catalog fetch (pinned/fallback wiring)");
+        }
+    }
+
+    #[test]
+    fn timeout_outcome_is_treated_as_no_cache() {
+        // The 90s deadline path records no cache proof (the child may still
+        // be running and write the cache later): dynamic must FAIL (fetch
+        // unknown), pinned/fallback must PASS (no fetch observed).
+        let timed_out = ProbeOutcome {
+            success: false,
+            stderr_tail: "codex probe timed out after 90s".into(),
+            models_cache_fetched: false,
+            cached_slugs: Vec::new(),
+        };
+        assert_eq!(
+            live_catalog_check(Mode::Dynamic, &timed_out).status,
+            crate::doctor::CheckStatus::Fail
+        );
+        assert_eq!(
+            live_catalog_check(Mode::Pinned, &timed_out).status,
+            crate::doctor::CheckStatus::Pass
+        );
+        assert_eq!(
+            live_catalog_check(Mode::Fallback, &timed_out).status,
+            crate::doctor::CheckStatus::Pass
+        );
+    }
+
+    // ---- models_cache.json slug parsing ----
+
+    #[test]
+    fn read_cached_slugs_parses_models_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("models_cache.json");
+        std::fs::write(
+            &path,
+            json!({"models": [
+                {"slug": "doctor/resp"},
+                {"slug": "doctorchat/chat"},
+                {"slug": "other/x"},
+                {"display_name": "no slug"}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            read_cached_slugs(&path),
+            vec![
+                "doctor/resp".to_string(),
+                "doctorchat/chat".to_string(),
+                "other/x".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn read_cached_slugs_is_empty_for_missing_or_bad_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("models_cache.json");
+        assert!(read_cached_slugs(&missing).is_empty());
+
+        let bad = dir.path().join("bad.json");
+        std::fs::write(&bad, "not json").unwrap();
+        assert!(read_cached_slugs(&bad).is_empty());
+
+        let wrong_shape = dir.path().join("shape.json");
+        std::fs::write(&wrong_shape, json!({"models": "not-an-array"}).to_string()).unwrap();
+        assert!(read_cached_slugs(&wrong_shape).is_empty());
+    }
 
     #[test]
     fn picks_first_function_tool_with_required_string() {
