@@ -44,6 +44,7 @@ mod proxy;
 mod quirks;
 mod session;
 mod upstream;
+mod version;
 mod wire;
 
 use clap::{Parser, Subcommand};
