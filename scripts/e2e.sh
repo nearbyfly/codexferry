@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # E2E: real Codex CLI against codexferry over the scripted e2e-mock upstream.
-# Usage: scripts/e2e.sh [basic|models|static|tools|multiturn|cross_format_switch|all]   (default: all)
+# Usage: scripts/e2e.sh [basic|models|static|tools|multiturn|cross_format_switch|stale_catalog|all]   (default: all)
 # Requires: codex CLI on PATH, python3, curl. Never touches ~/.codex or the
 # resident router's config — the CLI's CODEX_HOME is redirected to the
 # artifact dir. Markers that also appear in the user-prompt echo are asserted
@@ -113,16 +113,25 @@ scenario_static() {
   run_codex_static -m mocka/chat "Reply with exactly E2E_BASIC_OK"
   local out
   out=$(sed -n '/^codex$/, $p' "$(last_codex_output)")
-  grep -qF 'E2E_BASIC_OK' <<<"$out" || fail "CLI start under static-mode wiring failed"
-  # Route actually served through the router: at least one POST to chat or
-  # responses reached the upstream.
-  record_assert "$rec" \
-    'any(e["path"] in ("/v1/chat/completions", "/v1/responses") for e in e)'
-  # The static-mode defining property: codex never called /v1/models.
-  record_assert "$rec" \
-    'not any(e["path"] == "/v1/models" for e in e)'
+  grep -qF 'E2E_BASIC_OK' <<<"$out" || fail "CLI start under static-mode wiring failed (chat)"
+  # Second turn covers the responses wire - same scenario, different format.
+  # Mock returns E2E_RESP_OK on /v1/responses (vs E2E_BASIC_OK on chat), so the
+  # assistant-section grep distinguishes a successful responses round-trip
+  # from a chat round-trip.
+  run_codex_static -m mockr/resp "Reply with exactly E2E_RESP_OK"
+  out=$(sed -n '/^codex$/, $p' "$(last_codex_output)")
+  grep -qF 'E2E_RESP_OK' <<<"$out" || fail "CLI start under static-mode wiring failed (responses)"
+  # Both wires reached the upstream; static-mode defining property (no
+  # /v1/models call) holds for the whole session.
+  record_assert "$rec" '
+    any(e["path"] == "/v1/chat/completions" for e in e)
+    and any(e["path"] == "/v1/responses" for e in e)
+    and not any(e["path"] == "/v1/models" for e in e)
+  '
   metrics_assert_contains "$ROUTER_PORT" \
     'upstream_requests_total{provider="mocka",route="mocka/chat",model="e2e-model",error_class=""} 1'
+  metrics_assert_contains "$ROUTER_PORT" \
+    'upstream_requests_total{provider="mockr",route="mockr/resp",model="e2e-model",error_class=""} 1'
   cleanup_procs
   pass "static"
 }
@@ -255,6 +264,51 @@ scenario_cross_format_switch() {
   pass "cross_format_switch"
 }
 
+# Stale-pin regression: router exposes 3 routes, but the catalog pin was
+# generated from a narrower config that only lists one of them. codex
+# is wired with env_key + the stale pin, then asked to use a route that
+# is in the router but absent from the pin. This pins down the
+# architectural separation between routing (the router's job, driven
+# by its own config) and model metadata (the pin's job, codex-side):
+# the request must still reach the upstream via the router, and codex
+# must NOT fetch /v1/models to "fix" the missing entry (the pin forces
+# StaticModelsManager regardless of auth shape). If a future change ever
+# adds a silent "pin-miss -> live fetch" fallback, the /v1/models
+# assertion catches it.
+scenario_stale_catalog() {
+  log "scenario: stale catalog (pin missing a route)"
+  local rec="$ARTIFACT_DIR/record-stale.jsonl"
+  start_mock basic "$rec"
+  write_router_config "$ARTIFACT_DIR/config-stale.toml" "$(free_port)" "$MOCK_PORT"
+  start_router "$ARTIFACT_DIR/config-stale.toml"
+
+  # Build a deliberately-narrow pin source: keep the full [providers]
+  # section from the router config, restrict [routes] to just mocka/chat.
+  # The router will serve 3 routes; the pin will list 1.
+  awk '/^\[routes\]/,0 {exit} {print}' "$ARTIFACT_DIR/config-stale.toml" > "$ARTIFACT_DIR/config-stale-pin.toml"
+  cat >> "$ARTIFACT_DIR/config-stale-pin.toml" <<'EOF'
+[routes]
+"mocka/chat" = { model = "e2e-model" }
+EOF
+  "$REPO_ROOT/target/debug/codexferry" gen-catalog \
+    --config "$ARTIFACT_DIR/config-stale-pin.toml" \
+    --out    "$ARTIFACT_DIR/catalog.json" >/dev/null \
+    || fail "gen-catalog failed"
+
+  run_codex_static -m mockr/resp "Reply with exactly E2E_RESP_OK"
+  local out
+  out=$(sed -n '/^codex$/, $p' "$(last_codex_output)")
+  grep -qF 'E2E_RESP_OK' <<<"$out" || fail "stale pin: route mockr/resp did not reach the upstream"
+  record_assert "$rec" '
+    any(e["path"] == "/v1/responses" for e in e)
+    and not any(e["path"] == "/v1/models" for e in e)
+  '
+  metrics_assert_contains "$ROUTER_PORT" \
+    'upstream_requests_total{provider="mockr",route="mockr/resp",model="e2e-model",error_class=""} 1'
+  cleanup_procs
+  pass "stale_catalog"
+}
+
 cargo build --quiet --bin codexferry --bin e2e-mock || fail "build failed"
 command -v codex >/dev/null || fail "codex CLI not on PATH"
 command -v python3 >/dev/null || fail "python3 required"
@@ -262,8 +316,8 @@ command -v curl >/dev/null || fail "curl required"
 
 want="${1:-all}"
 case "$want" in
-  basic|models|static|tools|multiturn|cross_format_switch|all) ;;
-  *) fail "unknown scenario: $want (basic|models|static|tools|multiturn|cross_format_switch|all)" ;;
+  basic|models|static|tools|multiturn|cross_format_switch|stale_catalog|all) ;;
+  *) fail "unknown scenario: $want (basic|models|static|tools|multiturn|cross_format_switch|stale_catalog|all)" ;;
 esac
 case "$want" in
   basic) scenario_basic ;;
@@ -272,6 +326,7 @@ case "$want" in
   tools) scenario_tools ;;
   multiturn) scenario_multiturn ;;
   cross_format_switch) scenario_cross_format_switch ;;
-  all) scenario_basic; scenario_models; scenario_static; scenario_tools; scenario_multiturn; scenario_cross_format_switch ;;
+  stale_catalog) scenario_stale_catalog ;;
+  all) scenario_basic; scenario_models; scenario_static; scenario_tools; scenario_multiturn; scenario_cross_format_switch; scenario_stale_catalog ;;
 esac
 log "all requested scenarios passed"
