@@ -146,6 +146,29 @@ run_codex_resume() { # args…: -m <route> "<prompt>"
     "$@" >"$ARTIFACT_DIR/codex-resume-$(date +%s%N).log" 2>&1
 }
 
+# Static-mode wiring: env_key + a pre-generated model_catalog.json pin.
+# Under this wiring codex MUST NOT fetch /v1/models (env_key providers never
+# fetch, and the pin forces StaticModelsManager regardless of auth). The
+# catalog path is taken from $ARTIFACT_DIR/catalog.json by convention -
+# the scenario that calls this is responsible for generating the file with
+# `codexferry gen-catalog` before invoking run_codex_static. The path is
+# emitted as an absolute path so the `-c model_catalog_json=...` value
+# resolves against CODEX_HOME the same way codex resolves it for users
+# (relative paths in codex would otherwise be relative to ~/.codex/, but
+# here CODEX_HOME is the artifact dir so an absolute path keeps things
+# unambiguous).
+run_codex_static() { # args…: -m <route> "<prompt>"
+  mkdir -p "$ARTIFACT_DIR/codex-home"
+  CODEX_HOME="$ARTIFACT_DIR/codex-home" E2E_DUMMY_KEY=dummy codex exec -s read-only --skip-git-repo-check \
+    -c 'model_provider="e2e"' \
+    -c 'model_providers.e2e.name="e2e"' \
+    -c "model_providers.e2e.base_url=\"http://127.0.0.1:${ROUTER_PORT}/v1\"" \
+    -c 'model_providers.e2e.wire_api="responses"' \
+    -c 'model_providers.e2e.env_key="E2E_DUMMY_KEY"' \
+    -c "model_catalog_json=\"$ARTIFACT_DIR/catalog.json\"" \
+    "$@" >"$ARTIFACT_DIR/codex-$(date +%s%N).log" 2>&1
+}
+
 # Assert that codex actually FETCHED the live catalog: the models cache file
 # codex writes after a successful /models fetch must exist and contain every
 # given route slug. Only codex writes this file (a curl probe never does), so

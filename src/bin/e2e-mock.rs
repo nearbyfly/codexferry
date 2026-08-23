@@ -11,7 +11,7 @@ use axum::{
         sse::{Event, Sse},
         IntoResponse, Response,
     },
-    routing::post,
+    routing::{get, post},
     Router,
 };
 use clap::Parser;
@@ -231,6 +231,29 @@ async fn chat_handler(
     }
 }
 
+/// Probe-only handler for `GET /v1/models`. Records the request so the
+/// static-mode scenario can assert "codex did NOT fetch the live catalog"
+/// (env_key providers never fetch, so under static wiring the JSONL record
+/// must contain zero `/v1/models` entries). Returns 200 with an empty
+/// `ModelsResponse`; live-mode tests do not depend on this endpoint.
+async fn models_probe(
+    State(state): State<MockState>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let auth = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    record(&state, "/v1/models", &auth, b"");
+    (
+        axum::http::StatusCode::OK,
+        [("content-type", "application/json")],
+        json!({"models": []}).to_string(),
+    )
+        .into_response()
+}
+
 async fn responses_handler(
     State(state): State<MockState>,
     headers: axum::http::HeaderMap,
@@ -276,6 +299,11 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/v1/chat/completions", post(chat_handler))
         .route("/v1/responses", post(responses_handler))
+        // `/v1/models` is a probe endpoint only - the mock records the hit so
+        // e2e can assert "codex did NOT fetch the live catalog" under static
+        // wiring (env_key providers never fetch; the static e2e scenario
+        // relies on the absence of any such record entry).
+        .route("/v1/models", get(models_probe))
         .with_state(state);
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", args.port)).await?;
     eprintln!(
