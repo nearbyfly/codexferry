@@ -54,7 +54,23 @@ cargo run -- doctor --live --config cxf.toml
   smoke (spends tokens; starts a dedicated router from your real config with
   a rewritten ephemeral port, so the resident instance is untouched). Needs
   `E2E_REAL_CONFIG=path/to/cxf.toml` if your config lives outside the default
-  `~/.config/codexferry/cxf.toml`.
+  `~/.config/codexferry/cxf.toml`. Pick the codex-side wiring with
+  `E2E_REAL_MODE=static|dynamic` (default `dynamic`):
+
+  ```bash
+  # Live /v1/models + auth.command (default; asserts every tested route
+  # arrived through the /models fetch).
+  E2E_REAL_ROUTES="deepseek/... sensenova/..." E2E_REAL_CONFIG=cxf.toml \
+    scripts/e2e-real.sh
+
+  # env_key + model_catalog_json pin (gen-catalog from E2E_REAL_CONFIG;
+  # asserts routes work without ever fetching /v1/models). Run this mode
+  # separately to validate the static-mode example wiring against real
+  # upstreams - it costs its own set of tokens.
+  E2E_REAL_MODE=static \
+    E2E_REAL_ROUTES="deepseek/... sensenova/..." E2E_REAL_CONFIG=cxf.toml \
+    scripts/e2e-real.sh
+  ```
 
 On failure, all artifacts (CLI logs, mock request records, router log) are
 left in the temp directory printed at the end of the run.
