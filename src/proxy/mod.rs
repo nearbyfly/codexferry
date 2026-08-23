@@ -204,8 +204,9 @@ fn stream_metrics_error_class(
 
 /// Shared application state handed to every handler via axum's `State`.
 ///
-/// Wrapped in `Arc` by [`serve`], so cloning is cheap and all handlers share the
-/// same config, session store, and HTTP client.
+/// Wrapped in `Arc` by [`serve`], so cloning is cheap and all handlers share
+/// the same config, session store, HTTP client, model-catalog cache, metrics
+/// registry, and codex client-version tripwire.
 pub struct AppState {
     pub config: SharedConfig,
     pub sessions: SessionStore,
@@ -460,6 +461,35 @@ async fn handle_models(
     }
 }
 
+/// Sentinel tracker key for a `client_version` with no version-ish token.
+///
+/// `client_version` is caller-supplied, and the tracker's `seen` set keeps
+/// one PERMANENT entry per distinct string — it never evicts. Collapsing
+/// every unparseable value onto this single sentinel folds all digit-less
+/// junk into ONE series instead of one permanent entry per junk string
+/// (spec §3). Deliberately not version-shaped so it can never be mistaken
+/// for a real version.
+const UNPARSEABLE_CLIENT_VERSION: &str = "unparseable";
+
+/// Has `doctor` verified this exact codex version green?
+///
+/// `observed` is the already-normalized observed version (`None` when the
+/// caller's value had no version-ish token); `last_green` is the raw
+/// `last_green` field from doctor's state file, normalized here.
+///
+/// A `None` on EITHER side means "unverified", NEVER "equal" (spec §3.2).
+/// Comparing the two `Option`s directly would make two failed normalizations
+/// compare equal and report a false green.
+fn version_is_doctor_verified(observed: Option<&str>, last_green: Option<&str>) -> bool {
+    match (
+        observed,
+        last_green.and_then(crate::version::normalize_version),
+    ) {
+        (Some(seen), Some(verified)) => seen == verified,
+        _ => false,
+    }
+}
+
 /// Codex client-version tripwire (spec §3).
 ///
 /// On the FIRST sighting of a version this process, emits one `info!` line
@@ -467,11 +497,20 @@ async fn handle_models(
 /// Repeat sightings are entirely silent — these are once-per-version EVENT
 /// logs, not a second per-request line (the AGENTS.md #11 exception).
 ///
+/// The raw value is normalized before it is observed, so the tracker's
+/// `seen` set and log lines are keyed by normalized version; digit-less
+/// input collapses onto [`UNPARSEABLE_CLIENT_VERSION`] instead of one
+/// permanent entry per junk string.
+///
 /// Doctor's state is read from the production state file. Reading it is
 /// best-effort and infallible: a missing or malformed file simply means
 /// "never green"; the daemon never writes it — doctor is the only writer.
 fn observe_client_version(state: &AppState, raw: &str) {
-    let Some(transition) = state.version_tracker.observe(raw) else {
+    let normalized = crate::version::normalize_version(raw);
+    let Some(transition) = state
+        .version_tracker
+        .observe(normalized.as_deref().unwrap_or(UNPARSEABLE_CLIENT_VERSION))
+    else {
         return; // Already reported this version; stay silent.
     };
     let from = transition.from.as_deref().unwrap_or("(none)");
@@ -479,19 +518,7 @@ fn observe_client_version(state: &AppState, raw: &str) {
     tracing::info!("codex client {from} → {to} detected — rerun `codexferry doctor`");
 
     let doctor_state = crate::version::DoctorState::read();
-    // Normalize both sides before comparing: `client_version` is usually
-    // bare while doctor's `last_green` may carry a `codex-cli` prefix.
-    let verified = matches!(
-        (
-            crate::version::normalize_version(raw),
-            doctor_state
-                .last_green
-                .as_deref()
-                .and_then(crate::version::normalize_version)
-        ),
-        (Some(seen), Some(green)) if seen == green
-    );
-    if !verified {
+    if !version_is_doctor_verified(normalized.as_deref(), doctor_state.last_green.as_deref()) {
         let last = doctor_state.last_green.as_deref().unwrap_or("none");
         tracing::warn!("codex {to} not verified by doctor (last green: {last})");
     }
