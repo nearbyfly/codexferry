@@ -61,6 +61,7 @@ context_window = 1000
         client,
         models: crate::models_cache::CatalogCache::new(),
         metrics: crate::metrics::Metrics::new(),
+        version_tracker: Arc::new(crate::version::CodexVersionTracker::new()),
     });
 
     Router::new()

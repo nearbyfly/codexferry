@@ -212,6 +212,10 @@ pub struct AppState {
     pub client: reqwest::Client,
     pub models: crate::models_cache::CatalogCache,
     pub metrics: crate::metrics::Metrics,
+    /// Per-process codex client-version tripwire (spec §3): remembers which
+    /// versions this daemon has already reported so the "rerun doctor"
+    /// reminder fires once per version, not once per request.
+    pub version_tracker: Arc<crate::version::CodexVersionTracker>,
 }
 
 /// Decrements the in-flight gauge when dropped.
@@ -348,6 +352,7 @@ pub async fn serve(
         client,
         models: crate::models_cache::CatalogCache::new(),
         metrics: crate::metrics::Metrics::new(),
+        version_tracker: Arc::new(crate::version::CodexVersionTracker::new()),
     });
 
     // Delegate to build_router (extracted so tests can reuse it).
@@ -382,6 +387,9 @@ async fn handle_healthz() -> &'static str {
 ///   (`{"models": [...]}`), served from the [`CatalogCache`].
 ///
 /// Both shapes return an `ETag` header and support `If-None-Match` → 304.
+///
+/// A present `client_version` also feeds the version tripwire — including on
+/// the 304 path, since a revalidation is still a codex turn (spec §3).
 async fn handle_models(
     State(state): State<Arc<AppState>>,
     Query(q): Query<ModelsQuery>,
@@ -390,7 +398,11 @@ async fn handle_models(
     let config = state.config.read().await;
 
     match q.client_version {
-        Some(_) => {
+        Some(v) => {
+            // Runs before the If-None-Match short-circuit below so a 304
+            // revalidation still observes the version.
+            observe_client_version(&state, &v);
+
             // Codex ModelsResponse catalog shape (live model catalog).
             let (etag, body) = state.models.get(&config);
             drop(config);
@@ -445,6 +457,43 @@ async fn handle_models(
             )
                 .into_response()
         }
+    }
+}
+
+/// Codex client-version tripwire (spec §3).
+///
+/// On the FIRST sighting of a version this process, emits one `info!` line
+/// and warns while that version has not been verified green by `doctor`.
+/// Repeat sightings are entirely silent — these are once-per-version EVENT
+/// logs, not a second per-request line (the AGENTS.md #11 exception).
+///
+/// Doctor's state is read from the production state file. Reading it is
+/// best-effort and infallible: a missing or malformed file simply means
+/// "never green"; the daemon never writes it — doctor is the only writer.
+fn observe_client_version(state: &AppState, raw: &str) {
+    let Some(transition) = state.version_tracker.observe(raw) else {
+        return; // Already reported this version; stay silent.
+    };
+    let from = transition.from.as_deref().unwrap_or("(none)");
+    let to = &transition.to;
+    tracing::info!("codex client {from} → {to} detected — rerun `codexferry doctor`");
+
+    let doctor_state = crate::version::DoctorState::read();
+    // Normalize both sides before comparing: `client_version` is usually
+    // bare while doctor's `last_green` may carry a `codex-cli` prefix.
+    let verified = matches!(
+        (
+            crate::version::normalize_version(raw),
+            doctor_state
+                .last_green
+                .as_deref()
+                .and_then(crate::version::normalize_version)
+        ),
+        (Some(seen), Some(green)) if seen == green
+    );
+    if !verified {
+        let last = doctor_state.last_green.as_deref().unwrap_or("none");
+        tracing::warn!("codex {to} not verified by doctor (last green: {last})");
     }
 }
 
