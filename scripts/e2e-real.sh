@@ -3,7 +3,7 @@
 # router instance. Costs tokens: prompts are tiny, <= 3 turns per route.
 # Requires a debug build first: cargo build --quiet --bin codexferry.
 # Usage: E2E_REAL_ROUTES="glm/glm-4.7 deepseek/deepseek-v4-flash" \
-#        [E2E_REAL_CONFIG=path/to/config.toml] scripts/e2e-real.sh
+#        [E2E_REAL_CONFIG=path/to/cxf.toml] scripts/e2e-real.sh
 set -euo pipefail
 source "$(dirname "$0")/e2e-lib.sh"
 

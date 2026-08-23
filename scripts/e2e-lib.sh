@@ -92,9 +92,11 @@ start_router() { # $1 config path — sets ROUTER_PORT/ROUTER_PID
 # `-m` routes, and the resident ~/.codex/config.toml may set a different
 # default model_provider (e.g. "codexferry") that would hijack the request.
 # Auth is COMMAND-based (`auth = {command="echo", args=["dummy"]}`): codex
-# only fetches the live /v1/models?client_version= catalog for ChatGPT-auth
-# or command-auth providers - an env_key provider NEVER fetches, so the old
-# env_key wiring silently skipped catalog discovery in every scenario. The
+# only fetches the live /v1/models?client_version= catalog when the active
+# auth is Codex-backed (ChatGPT OAuth, headers, agent identity, or personal
+# access token) or the provider has an auth command - an env_key-only
+# provider with no Codex-backed auth never fetches, so the old env_key
+# wiring silently skipped catalog discovery in every scenario. The
 # router does not authenticate clients; the echoed token is a dummy.
 run_codex() { # args…: -m <route> "<prompt>"
   mkdir -p "$ARTIFACT_DIR/codex-home"

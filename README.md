@@ -245,9 +245,11 @@ shape (`codex-rs/models-manager/src/manager.rs`, `should_refresh_models`):
 self.endpoint_client.uses_codex_backend().await || self.endpoint_client.has_command_auth()
 ```
 
-`uses_codex_backend` requires ChatGPT-family auth; `has_command_auth` requires
-the provider to declare an auth command (`[model_providers.X.auth]` with a
-`command`). An `env_key` provider satisfies **neither** - codex never fetches
+`uses_codex_backend` is true when the active auth is a Codex-backed mode
+(ChatGPT OAuth/tokens, headers, agent identity, or personal access token);
+`has_command_auth` requires the provider to declare an auth command
+(`[model_providers.X.auth]` with a `command`). An `env_key`-only provider
+with no Codex-backed auth satisfies **neither** - codex does not fetch
 `/models` for it, and a `model_catalog_json` pin switches codex to the static
 in-process catalog (`StaticModelsManager`) regardless of auth. That yields the
 two supported modes, both with ready-made examples in `scripts/`.

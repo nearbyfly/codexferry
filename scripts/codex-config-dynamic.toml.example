@@ -6,12 +6,13 @@
 # GET /v1/models?client_version=... on session start (cache miss) and caches
 # it in ~/.codex/models_cache.json (TTL 300s, ETag revalidation).
 #
-# The switch that makes it work: provider auth via COMMAND. codex only fetches
-# /models for ChatGPT-auth or command-auth providers (codex-rs
-# models-manager/src/manager.rs `should_refresh_models`); an env_key provider
-# NEVER fetches. `auth` is mutually exclusive with env_key /
-# experimental_bearer_token / requires_openai_auth in codex's config schema -
-# do not combine them.
+# The switch that makes it work: provider auth via COMMAND. codex fetches
+# /models when the active auth is a Codex-backed mode (ChatGPT OAuth, headers,
+# agent identity, or personal-access-token modes) or the provider declares an
+# auth command (codex-rs models-manager/src/manager.rs `should_refresh_models`);
+# an env_key-only provider with no Codex-backed auth never fetches. `auth` is
+# mutually exclusive with env_key / experimental_bearer_token /
+# requires_openai_auth in codex's config schema - do not combine them.
 #
 # The router does not authenticate clients, so the echoed token is a dummy.
 
