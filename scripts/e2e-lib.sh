@@ -169,6 +169,24 @@ run_codex_static() { # args…: -m <route> "<prompt>"
     "$@" >"$ARTIFACT_DIR/codex-$(date +%s%N).log" 2>&1
 }
 
+# Static-mode resume: same env_key + model_catalog_json wiring as
+# run_codex_static, but for `codex exec resume --last`. Mirrors the
+# dynamic run_codex_resume shape (no -s short flag, restored via
+# sandbox_mode override; the catalog pin stays absolute so resume sees
+# the same model metadata the original turn saw).
+run_codex_resume_static() { # args…: -m <route> "<prompt>"
+  mkdir -p "$ARTIFACT_DIR/codex-home"
+  CODEX_HOME="$ARTIFACT_DIR/codex-home" E2E_DUMMY_KEY=dummy codex exec resume --last --skip-git-repo-check \
+    -c 'model_provider="e2e"' \
+    -c 'sandbox_mode="read-only"' \
+    -c 'model_providers.e2e.name="e2e"' \
+    -c "model_providers.e2e.base_url=\"http://127.0.0.1:${ROUTER_PORT}/v1\"" \
+    -c 'model_providers.e2e.wire_api="responses"' \
+    -c 'model_providers.e2e.env_key="E2E_DUMMY_KEY"' \
+    -c "model_catalog_json=\"$ARTIFACT_DIR/catalog.json\"" \
+    "$@" >"$ARTIFACT_DIR/codex-resume-$(date +%s%N).log" 2>&1
+}
+
 # Assert that codex actually FETCHED the live catalog: the models cache file
 # codex writes after a successful /models fetch must exist and contain every
 # given route slug. Only codex writes this file (a curl probe never does), so
