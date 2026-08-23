@@ -217,6 +217,10 @@ pub struct AppState {
     /// versions this daemon has already reported so the "rerun doctor"
     /// reminder fires once per version, not once per request.
     pub version_tracker: Arc<crate::version::CodexVersionTracker>,
+    /// Path to the doctor state file (under `XDG_STATE_HOME`/`~/.local/state`).
+    /// Injected rather than resolved here so tests never touch the developer's
+    /// real state file (`DoctorState::read()` would consult `HOME`).
+    pub doctor_state_path: std::path::PathBuf,
 }
 
 /// Decrements the in-flight gauge when dropped.
@@ -354,6 +358,7 @@ pub async fn serve(
         models: crate::models_cache::CatalogCache::new(),
         metrics: crate::metrics::Metrics::new(),
         version_tracker: Arc::new(crate::version::CodexVersionTracker::new()),
+        doctor_state_path: crate::version::state_path(),
     });
 
     // Delegate to build_router (extracted so tests can reuse it).
@@ -471,6 +476,52 @@ async fn handle_models(
 /// for a real version.
 const UNPARSEABLE_CLIENT_VERSION: &str = "unparseable";
 
+/// Longest `client_version` accepted as a metric label, in bytes.
+///
+/// `normalize_version` is a token PICKER, not a validator — it happily
+/// returns a 4 KiB token as long as it holds a digit. Real codex versions are
+/// well under this; anything longer is caller noise.
+const MAX_CLIENT_VERSION_LEN: usize = 32;
+
+/// Is every byte of `token` safe to render inside a Prometheus label value?
+///
+/// `prometheus-client` 0.25 does NO escaping of label values (its
+/// `EncodeLabelValue for &str` is a bare `write_str`), and `client_version` is
+/// the only caller-derived label in the whole registry — every other one comes
+/// from validated config. An unescaped `"` or `}` would close the label set
+/// early and corrupt the entire `/metrics` scrape (e.g. `client_version=1"}`
+/// renders `codex_client_info{version="1"}"} 1`). The allowed set covers every
+/// character real version strings use, including semver pre-release/build
+/// separators.
+fn is_safe_version_token(token: &str) -> bool {
+    token
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'+' | b'_' | b'-'))
+}
+
+/// Turn a normalized `client_version` into a bounded, injection-safe label.
+///
+/// Accepts the token only when it is non-empty, within
+/// [`MAX_CLIENT_VERSION_LEN`] bytes, and passes [`is_safe_version_token`];
+/// every other value — including a failed normalization — collapses onto
+/// [`UNPARSEABLE_CLIENT_VERSION`].
+///
+/// The emptiness check is not redundant: an empty token satisfies both other
+/// guards (length 0 is under the cap, and the charset check is vacuously true
+/// over zero bytes), so without it `Some("")` would emit a bare
+/// `version=""` label. `normalize_version` never returns one today, but this
+/// helper is shared and must not rely on a caller's invariant.
+fn client_version_label_from(normalized: Option<&str>) -> String {
+    match normalized {
+        Some(v)
+            if !v.is_empty() && v.len() <= MAX_CLIENT_VERSION_LEN && is_safe_version_token(v) =>
+        {
+            v.to_string()
+        }
+        _ => UNPARSEABLE_CLIENT_VERSION.to_string(),
+    }
+}
+
 /// Has `doctor` verified this exact codex version green?
 ///
 /// `observed` is the already-normalized observed version (`None` when the
@@ -506,18 +557,22 @@ fn version_is_doctor_verified(observed: Option<&str>, last_green: Option<&str>) 
 /// best-effort and infallible: a missing or malformed file simply means
 /// "never green"; the daemon never writes it — doctor is the only writer.
 fn observe_client_version(state: &AppState, raw: &str) {
+    // Two values from ONE normalization: `normalized` is `None` for an
+    // unparseable input and drives the doctor-verified comparison (where
+    // `None` means "unverified"), while `label` collapses that case — and
+    // any unsafe/over-long token — onto the sentinel so the tracker and the
+    // gauge stay bounded (see [`client_version_label_from`]).
     let normalized = crate::version::normalize_version(raw);
-    let Some(transition) = state
-        .version_tracker
-        .observe(normalized.as_deref().unwrap_or(UNPARSEABLE_CLIENT_VERSION))
-    else {
+    let label = client_version_label_from(normalized.as_deref());
+    let Some(transition) = state.version_tracker.observe(&label) else {
         return; // Already reported this version; stay silent.
     };
     let from = transition.from.as_deref().unwrap_or("(none)");
     let to = &transition.to;
     tracing::info!("codex client {from} → {to} detected — rerun `codexferry doctor`");
+    state.metrics.record_codex_client(to);
 
-    let doctor_state = crate::version::DoctorState::read();
+    let doctor_state = crate::version::DoctorState::read_from(&state.doctor_state_path);
     if !version_is_doctor_verified(normalized.as_deref(), doctor_state.last_green.as_deref()) {
         let last = doctor_state.last_green.as_deref().unwrap_or("none");
         tracing::warn!("codex {to} not verified by doctor (last green: {last})");

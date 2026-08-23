@@ -435,10 +435,20 @@ async fn doctor_live_probe_report_has_no_failures() {
     }
     // doctor --live prints its own report and exits 1 on failure; run the
     // binary the way a user would and require a clean exit.
+    //
+    // `XDG_STATE_HOME` MUST point at a tempdir: `apply_record` (and any
+    // future green-run write) persists `~/.local/state/codexferry/doctor.json`.
+    // Without the override, every CI run writes the developer's real state
+    // file, polluting later runs and breaking isolation. `dir` must outlive
+    // the child: `XDG_STATE_HOME` points into it.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state_home = dir.path().join("state");
+    std::fs::create_dir_all(&state_home).expect("mkdir state");
     let bin = env!("CARGO_BIN_EXE_codexferry");
     let out = std::process::Command::new(bin)
         .args(["doctor", "--live", "--config", "config.toml"])
         .env("CODEXFERRY_CONFIG", "config.toml")
+        .env("XDG_STATE_HOME", &state_home)
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);

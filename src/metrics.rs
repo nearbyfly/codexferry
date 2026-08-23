@@ -118,6 +118,17 @@ pub struct GaugeLabels {
     route: String,
 }
 
+/// Labels for the codex client info gauge: the client version string.
+/// Cardinality is bounded by `proxy/mod.rs::MAX_CLIENT_VERSION_LEN` and the
+/// charset gate there — every value that reaches this struct is non-empty,
+/// ≤ 32 bytes, and composed of `[0-9A-Za-z.+_-]`. Digit-less / over-long /
+/// unparseable inputs collapse onto [`UNPARSEABLE_CLIENT_VERSION`] in the
+/// proxy module so the gauge family never grows unbounded.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct CodexVersionLabels {
+    version: String,
+}
+
 /// Prometheus metrics registry for the proxy.
 ///
 /// Holds all metric families that later request-handler tasks will record
@@ -131,6 +142,8 @@ pub struct Metrics {
     in_flight: Family<GaugeLabels, Gauge>,
     ttft: Family<LatencyLabels, Histogram>,
     duration: Family<LatencyLabels, Histogram>,
+    codex_client_info: Family<CodexVersionLabels, Gauge>,
+    codex_client_changes: Counter,
 }
 
 impl Metrics {
@@ -146,6 +159,8 @@ impl Metrics {
         let duration = Family::<LatencyLabels, Histogram>::new_with_constructor(|| {
             Histogram::new(DURATION_BUCKETS)
         });
+        let codex_client_info = Family::<CodexVersionLabels, Gauge>::default();
+        let codex_client_changes = Counter::default();
 
         let mut registry = Registry::default();
         registry.register(
@@ -178,6 +193,16 @@ impl Metrics {
             "Total upstream request duration, in seconds",
             duration.clone(),
         );
+        registry.register(
+            "codex_client_info",
+            "Codex client versions observed on /models, value 1",
+            codex_client_info.clone(),
+        );
+        registry.register(
+            "codex_client_changes",
+            "Codex client version first-sightings detected",
+            codex_client_changes.clone(),
+        );
 
         Self {
             registry: Arc::new(registry),
@@ -187,6 +212,8 @@ impl Metrics {
             in_flight,
             ttft,
             duration,
+            codex_client_info,
+            codex_client_changes,
         }
     }
 
@@ -236,6 +263,17 @@ impl Metrics {
                 model: model.to_string(),
             })
             .inc_by(u64::from(output_tokens));
+    }
+
+    /// Record a first-sighting of a codex client version (spec §3 / L4): set
+    /// the per-version info gauge to 1 and bump the change counter.
+    pub(crate) fn record_codex_client(&self, version: &str) {
+        self.codex_client_info
+            .get_or_create(&CodexVersionLabels {
+                version: version.to_string(),
+            })
+            .set(1);
+        self.codex_client_changes.inc();
     }
 
     /// Observe time-to-first-token for one request.

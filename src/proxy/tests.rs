@@ -62,6 +62,7 @@ context_window = 1000
         models: crate::models_cache::CatalogCache::new(),
         metrics: crate::metrics::Metrics::new(),
         version_tracker: Arc::new(crate::version::CodexVersionTracker::new()),
+        doctor_state_path: crate::version::state_path(),
     });
 
     Router::new()

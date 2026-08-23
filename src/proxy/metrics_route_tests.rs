@@ -16,6 +16,7 @@ async fn metrics_endpoint_returns_200() {
         models: crate::models_cache::CatalogCache::default(),
         metrics: crate::metrics::Metrics::new(),
         version_tracker: Arc::new(crate::version::CodexVersionTracker::new()),
+        doctor_state_path: std::path::PathBuf::from("/tmp/codexferry-test-no-state"),
     });
     // Record a sample metric so the registry has data to encode.
     state.metrics.record_request(
