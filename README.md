@@ -69,10 +69,13 @@ Ready-made examples for the Codex side live in `scripts/`:
 
 - **`codex-config-dynamic.toml.example`** (recommended): command-auth wiring
   under which codex fetches the model catalog live from `GET /v1/models` on
-  session start. Adding a route to `cxf.toml` needs no regeneration step;
-  codex picks it up when its 300s models cache expires. The `/model` picker
-  list is *merged* (codexferry routes + codex's bundled models) — that is a
-  codex-side behavior no config can turn off for non-ChatGPT auth.
+  session start. Route changes in `cxf.toml` take effect without a
+  regeneration step; the daemon invalidates codex's catalog cache on every
+  hot-reload, so any newly started codex process sees the change immediately
+  (see "Adding and removing routes" below for the per-workflow details). The
+  `/model` picker list is *merged* (codexferry routes + codex's bundled
+  models) — that is a codex-side behavior no config can turn off for
+  non-ChatGPT auth.
 - **`codex-config-static.toml.example`**: pin a `gen-catalog`-generated file
   with `model_catalog_json`. Pure model list (nothing bundled leaks in) and
   independent of the `/models` endpoint, but the file is a snapshot —
@@ -92,9 +95,14 @@ care) that different models may be backed by different providers.
 ```bash
 codex -m deepseek/deepseek-v4-flash
 codex -m deepseek/deepseek-v4-pro
-# Mid-session, switch to a model backed by a different provider:
-codex -m ark/glm-5.2
+# Switch an exec conversation to a model backed by a different provider,
+# carrying the full history across:
+codex exec resume --last --skip-git-repo-check -m ark/glm-5.2 "continue"
 ```
+
+For adding/removing routes on the fly (what works immediately, what needs a
+resume, what needs a TUI restart), see
+[Adding and removing routes](#adding-and-removing-routes-dynamic-mode).
 
 ## Configuration Reference
 
@@ -282,10 +290,63 @@ merges it with its bundled models. Verified on codex 0.147.0: `codex debug
 models` lists the router routes alongside the bundled gpt models, and real
 `codex exec` turns resolve their metadata from the fetched catalog.
 
+On every successful hot-reload the daemon deletes that cache file, so codex's
+next catalog read re-fetches `/v1/models` instead of waiting out the 300s TTL.
+A background worker inside codex also re-fetches every 3 minutes on its own.
+
 Caveat: the `/model` picker list is a MERGE, not a replacement - non-ChatGPT
 auth cannot suppress codex's bundled models (`apply_remote_models` requires a
 ChatGPT account for replace semantics). For a pure route-only list, use
 static mode.
+
+### Adding and removing routes (dynamic mode)
+
+Both operations start the same way - edit `cxf.toml` and save. The daemon
+hot-reloads, serves the updated catalog from `/v1/models`, and deletes
+codex's `~/.codex/models_cache.json` so the next codex catalog read is fresh.
+What differs is what a *running* codex session does next, because codex pins
+the `-m` selection for the lifetime of a session: the catalog governs what
+can be *selected*, never what is *already selected*.
+
+**Adding a route** - new sessions see it immediately, running ones do not:
+
+```bash
+# Immediate: any newly started codex process resolves the new route.
+codex exec --skip-git-repo-check -m sensenova/glm-5.2 "task"
+
+# Immediate, and carries an existing conversation over to the new route
+# (full history preserved, cross-provider and cross-wire both fine).
+codex exec resume --last --skip-git-repo-check -m sensenova/glm-5.2 "continue"
+
+# Immediate: restart the TUI and the /model picker lists it.
+```
+
+A *running* TUI's `/model` picker will not list the new route: codex takes
+the picker list as a one-time snapshot at TUI startup and never refreshes it
+in-process. Switching within a running TUI only works for models that were
+already listed when that TUI started.
+
+**Removing a route** - sessions on other routes are unaffected; sessions on
+the removed route fail on their next turn:
+
+- The router answers 400 `no route for model` for the removed key (correct
+  defense - the route no longer exists).
+- To continue a conversation that was running on the removed route, resume
+  it onto a live route (`-m` is mandatory - a bare resume re-uses the
+  recorded model and keeps 400ing):
+
+```bash
+codex exec resume --last --skip-git-repo-check -m deepseek/deepseek-v4-flash "continue"
+```
+
+- An active TUI conversation on the removed route: switch via `/model` to a
+  route that existed when the TUI started, or restart the TUI.
+- Expect codex's "This session was recorded with model X but is resuming
+  with Y" warning on model-changing resumes. For same-family routes behind
+  this router it is safe to ignore - both sides' metadata comes from the
+  same generated catalog. It matters only when the new route has a smaller
+  context window or a weaker reasoning ladder (codex re-clamps the effort
+  and may compact the history).
 
 ### Static mode: generated catalog, pinned
 
