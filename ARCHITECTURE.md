@@ -323,38 +323,40 @@ Turn 2: codex -m ark/glm-5.2  (switch provider!)
 ```
 codexferry/
 ├── Cargo.toml
-├── config.toml.example
+├── cxf.toml.example         # Router config template (real cxf.toml is gitignored)
 ├── AGENTS.md               # AI agent notes
 ├── ARCHITECTURE.md         # This file
 ├── README.md               # User guide
 ├── scripts/
-│   ├── e2e-lib.sh           # E2E shared helpers: sandbox selection + run_codex (181)
-│   ├── e2e.sh               # deterministic E2E layer: basic/models/tools/multiturn (193)
-│   └── e2e-real.sh          # opt-in real-provider smoke; refuses sandbox bypass (91)
+│   ├── e2e-lib.sh           # E2E shared helpers: sandbox selection + run_codex (215)
+│   ├── e2e.sh               # deterministic E2E layer: basic/models/tools/multiturn (199)
+│   ├── e2e-real.sh          # opt-in real-provider smoke; refuses sandbox bypass (97)
+│   ├── codex-config-dynamic.toml.example  # Codex CLI side: live /models catalog via auth.command (47)
+│   └── codex-config-static.toml.example   # Codex CLI side: pinned gen-catalog file (34)
 ├── docs/superpowers/
 │   └── specs/              # Migration spec (the original design spec and plan
 │                           #   live in the retained codex-router-rs repo)
 ├── src/
-│   ├── main.rs             # CLI entry (clap) (175 lines)
+│   ├── main.rs             # CLI entry (clap) (171 lines)
 │   ├── bin/
-│   │   └── e2e-mock.rs     # scripted mock upstream for the E2E scripts (350)
-│   ├── config.rs           # TOML types + validation + hot reload (857)
+│   │   └── e2e-mock.rs     # scripted mock upstream for the E2E scripts (354)
+│   ├── config.rs           # TOML types + validation + hot reload (954)
 │   ├── doctor.rs           # doctor subcommand: offline drift check + report (315)
 │   ├── doctor_live.rs      # doctor --live: mock upstream + wire-shape probe (808)
 │   ├── proxy/
-│   │   ├── mod.rs             # axum routing + dispatch (659)
+│   │   ├── mod.rs             # axum routing + dispatch (660)
 │   │   ├── chat.rs            # chat-format handler (515)
 │   │   ├── passthrough.rs     # responses-format relay (472)
 │   │   ├── upstream.rs        # send_upstream + error-class dedup helpers (150)
 │   │   ├── capture.rs         # session/usage capture (164)
-│   │   │   └── tests.rs       # capture unit tests (174)
+│   │   │   └── tests.rs       # capture unit tests (178)
 │   │   ├── tests.rs           # unit tests (227)
 │   │   └── metrics_route_tests.rs  # metrics route unit tests (42)
 │   ├── quirks.rs           # quirk names + GLM matcher (63)
 │   ├── heal/
 │   │   ├── mod.rs           # HealGates + facade re-exports (63)
-│   │   ├── think.rs         # think-tag healing (234)
-│   │   ├── dsml.rs          # DSML tool-call healing (635)
+│   │   ├── think.rs         # think-tag healing (192)
+│   │   ├── dsml.rs          # DSML tool-call healing (677)
 │   │   ├── responses.rs     # Responses passthrough healer (611)
 │   │   └── (tests: heal/{think,dsml,responses_healer}_tests.rs)
 │   ├── session.rs          # SessionStore (340)
@@ -387,7 +389,7 @@ codexferry/
 > Line counts are approximate and include comments; they drift as the code evolves.
 > Update them when making significant changes.
 
-~18,519 lines total. 310 tests (269 unit + 5 e2e-mock unit + 35 integration + 1 ignored).
+~18,748 lines total. 314 tests (273 unit + 5 e2e-mock unit + 35 integration + 1 ignored).
 
 **Catalog generation is deny-by-default**: the allowlist inherits only
 `base_instructions` and `model_messages` from the bundled Codex template; every

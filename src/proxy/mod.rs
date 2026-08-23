@@ -247,9 +247,10 @@ pub async fn run() -> anyhow::Result<()> {
     // Initialize tracing (log level controlled by RUST_LOG).
     logging::init();
 
-    // Config path from CODEXFERRY_CONFIG, defaulting to ./config.toml.
-    let config_path = std::env::var("CODEXFERRY_CONFIG").unwrap_or_else(|_| "config.toml".into());
-    let config_path = std::path::PathBuf::from(&config_path);
+    // Config path: CODEXFERRY_CONFIG, else ./cxf.toml, else the legacy
+    // ./config.toml (with a deprecation warning) - see
+    // `config::default_config_path`.
+    let config_path = crate::config::default_config_path();
 
     serve(&config_path, signal_shutdown()).await
 }

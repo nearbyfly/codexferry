@@ -2,7 +2,9 @@
 .worktrees/
 
 # The author's working config: copied into the repo root but never committed.
-# The committed template is `config.toml.example`. Ignored (rather than merely
+# The committed template is `cxf.toml.example`. Ignored (rather than merely
 # untracked, as in the old repo) so a stray `git add -A` cannot publish local
-# provider choices.
+# provider keys. The legacy name stays ignored too: an upgraded installation
+# may still carry `config.toml` (the resolver falls back to it with a warning).
+/cxf.toml
 /config.toml

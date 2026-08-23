@@ -1,6 +1,6 @@
 //! TOML configuration types, validation rules, and hot-reload watcher.
 //!
-//! The config file (default `config.toml`, overridable via the
+//! The config file (default `cxf.toml`, overridable via the
 //! `CODEXFERRY_CONFIG` env var) is a TOML document with five optional
 //! sections, each mirrored by a struct below:
 //!
@@ -324,6 +324,60 @@ pub struct ValidatedRoute {
     /// `None` leaves the catalog entry without reasoning fields (see
     /// [`RouteConfig::default_reasoning_effort`]).
     pub default_reasoning_effort: Option<String>,
+}
+
+/// Current default config filename (the file the server and subcommands load
+/// when no explicit path is given). Renamed from `config.toml` on 2026-08-23
+/// to stop colliding, in name and in conversation, with Codex's own
+/// `~/.codex/config.toml` - the two files describe opposite ends of the same
+/// pipe and the shared name kept producing mixups.
+pub const DEFAULT_CONFIG_FILENAME: &str = "cxf.toml";
+
+/// Pre-rename default filename, still honored so an existing installation
+/// does not silently lose its routes (the rename would otherwise manifest as
+/// "config not found" or an empty route table - the exact silent-loss class
+/// the doctor route-count check exists to catch).
+const LEGACY_CONFIG_FILENAME: &str = "config.toml";
+
+/// Resolve the config path used when no explicit `--config` is passed:
+///
+/// 1. `$CODEXFERRY_CONFIG`, if set (unchanged semantics);
+/// 2. `./cxf.toml`, if it exists;
+/// 3. `./config.toml` (legacy), if it exists - emits a deprecation warning;
+/// 4. otherwise `./cxf.toml`, so the downstream "file not found" error names
+///    the current default rather than a name the user never wrote.
+pub fn default_config_path() -> std::path::PathBuf {
+    let env = std::env::var("CODEXFERRY_CONFIG").ok();
+    let (path, legacy) = resolve_default_config(env.as_deref(), std::path::Path::new("."));
+    if legacy {
+        // eprintln, not tracing: the doctor and gen-catalog paths may run
+        // without a tracing subscriber, and a silent legacy pickup is worse
+        // than the current behavior it replaces.
+        eprintln!(
+            "WARNING: loading legacy config `{}`; rename it to `{}` (the default filename) \
+             to silence this warning",
+            path.display(),
+            DEFAULT_CONFIG_FILENAME
+        );
+    }
+    path
+}
+
+/// Pure resolution core of [`default_config_path`], parameterized for tests.
+/// Returns the resolved path and whether it is the legacy filename.
+fn resolve_default_config(env: Option<&str>, cwd: &Path) -> (std::path::PathBuf, bool) {
+    if let Some(env) = env {
+        return (std::path::PathBuf::from(env), false);
+    }
+    let current = cwd.join(DEFAULT_CONFIG_FILENAME);
+    if current.exists() {
+        return (current, false);
+    }
+    let legacy = cwd.join(LEGACY_CONFIG_FILENAME);
+    if legacy.exists() {
+        return (legacy, true);
+    }
+    (current, false)
 }
 
 impl Config {
@@ -757,6 +811,49 @@ pub fn spawn_watcher(path: &Path, shared: SharedConfig) -> anyhow::Result<impl W
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_path_env_var_wins_over_both_filenames() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(DEFAULT_CONFIG_FILENAME), "").unwrap();
+        std::fs::write(dir.path().join(LEGACY_CONFIG_FILENAME), "").unwrap();
+        let (path, legacy) =
+            resolve_default_config(Some("/explicit/cxf.toml"), dir.path());
+        assert_eq!(path, std::path::PathBuf::from("/explicit/cxf.toml"));
+        assert!(!legacy);
+    }
+
+    #[test]
+    fn default_path_prefers_cxf_toml_when_both_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(DEFAULT_CONFIG_FILENAME), "").unwrap();
+        std::fs::write(dir.path().join(LEGACY_CONFIG_FILENAME), "").unwrap();
+        let (path, legacy) = resolve_default_config(None, dir.path());
+        assert_eq!(path, dir.path().join(DEFAULT_CONFIG_FILENAME));
+        assert!(!legacy);
+    }
+
+    #[test]
+    fn default_path_falls_back_to_legacy_config_toml_with_flag() {
+        // The whole point of the fallback: an installation upgraded in place
+        // keeps its routes, but the legacy pickup is flagged so the operator
+        // renames the file instead of depending on the fallback forever.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(LEGACY_CONFIG_FILENAME), "").unwrap();
+        let (path, legacy) = resolve_default_config(None, dir.path());
+        assert_eq!(path, dir.path().join(LEGACY_CONFIG_FILENAME));
+        assert!(legacy);
+    }
+
+    #[test]
+    fn default_path_names_cxf_toml_when_nothing_exists() {
+        // No file at all: return the CURRENT default (not the legacy name)
+        // so the "file not found" error tells the user what to create.
+        let dir = tempfile::tempdir().unwrap();
+        let (path, legacy) = resolve_default_config(None, dir.path());
+        assert_eq!(path, dir.path().join(DEFAULT_CONFIG_FILENAME));
+        assert!(!legacy);
+    }
 
     fn make_config(toml_str: &str) -> ValidatedConfig {
         Config::parse_str(toml_str).unwrap().validate().unwrap()
