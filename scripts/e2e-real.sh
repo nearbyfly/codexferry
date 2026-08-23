@@ -37,7 +37,7 @@ metrics_success_count() { # $1 router port, $2 route
   fi
 }
 
-REAL_CONFIG="${E2E_REAL_CONFIG:-$HOME/.config/codexferry/config.toml}"
+REAL_CONFIG="${E2E_REAL_CONFIG:-$HOME/.config/codexferry/cxf.toml}"
 [ -f "$REAL_CONFIG" ] || fail "router config not found: $REAL_CONFIG"
 [ -x "$REPO_ROOT/target/debug/codexferry" ] || fail "build codexferry first: cargo build --quiet --bin codexferry"
 

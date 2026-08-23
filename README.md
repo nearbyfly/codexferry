@@ -24,8 +24,8 @@ Requirements: Rust stable (≥1.75), no system dependencies (uses rustls, not Op
 ### 2. Configure
 
 ```bash
-cp config.toml.example config.toml
-# Edit config.toml - set your provider base URLs and API keys
+cp cxf.toml.example cxf.toml
+# Edit cxf.toml - set your provider base URLs and API keys
 ```
 
 Minimal config:
@@ -63,24 +63,27 @@ RUST_LOG=codexferry=debug CODEXFERRY_TRACE_BODY=1 ./target/release/codexferry 2>
 
 ### 5. Configure Codex CLI
 
-In `~/.codex/config.toml`:
+The router config (`cxf.toml`) and the Codex CLI config
+(`~/.codex/config.toml`) are two ends of the same pipe — don't confuse them.
+Ready-made examples for the Codex side live in `scripts/`:
 
-```toml
-[model_providers.codexferry]
-name = "codexferry"
-base_url = "http://127.0.0.1:8787/v1"
-wire_api = "responses"
-env_key = "CODEXFERRY_DUMMY"  # any non-empty value; the proxy handles real keys
-```
+- **`codex-config-dynamic.toml.example`** (recommended): command-auth wiring
+  under which codex fetches the model catalog live from `GET /v1/models` on
+  session start. Adding a route to `cxf.toml` needs no regeneration step;
+  codex picks it up when its 300s models cache expires. The `/model` picker
+  list is *merged* (codexferry routes + codex's bundled models) — that is a
+  codex-side behavior no config can turn off for non-ChatGPT auth.
+- **`codex-config-static.toml.example`**: pin a `gen-catalog`-generated file
+  with `model_catalog_json`. Pure model list (nothing bundled leaks in) and
+  independent of the `/models` endpoint, but the file is a snapshot —
+  re-run `gen-catalog` after route changes or codex upgrades.
 
-Set the dummy env var (Codex requires a non-empty key):
-
-```bash
-export CODEXFERRY_DUMMY="dummy"
-```
+Both were verified end-to-end on codex 0.147.0. Copy one to
+`~/.codex/config.toml` (merging with your own approval/sandbox/projects
+settings) — the file headers explain the mode-specific keys.
 
 That's the **only** provider Codex ever needs. The router aggregates every
-upstream from `config.toml` and exposes them as `provider/alias` model names,
+upstream from `cxf.toml` and exposes them as `provider/alias` model names,
 so switching models is just `codex -m <alias>` — Codex has no idea (and doesn't
 care) that different models may be backed by different providers.
 
@@ -209,7 +212,7 @@ disabled = ["glm_thinking"]
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CODEXFERRY_CONFIG` | `config.toml` | Path to config file |
+| `CODEXFERRY_CONFIG` | `cxf.toml` | Path to config file (a legacy `./config.toml` still loads, with a warning) |
 | `CODEXFERRY_TRACE_BODY` | (unset) | Set to `1` to log request/response bodies at debug level |
 | `RUST_LOG` | `codexferry=info` | Log level filter (e.g. `debug`, `codexferry=debug`) |
 
@@ -229,51 +232,114 @@ for upstream requests — request counts by error class, token usage,
 time-to-first-token and full-duration latency, and an in-flight gauge, labeled
 per provider/route/model.
 
-## Live Model Catalog via `/models`
+## Model Catalog: `/models` and `model_catalog_json`
 
-The router **automatically** serves the Codex model catalog at `GET /v1/models`
-when Codex sends its `client_version` query parameter (which it does
-unconditionally). Just point Codex at the router's base URL — no
-`model_catalog_json`, no `gen-catalog` step:
+codexferry serves a live Codex model catalog at `GET /v1/models`: when a client
+sends the `client_version` query parameter, the daemon answers with the Codex
+`ModelsResponse` catalog shape built from the hot-reloaded `cxf.toml`.
+
+Whether **Codex CLI** calls that endpoint is decided by the provider's auth
+shape (`codex-rs/models-manager/src/manager.rs`, `should_refresh_models`):
+
+```rust
+self.endpoint_client.uses_codex_backend().await || self.endpoint_client.has_command_auth()
+```
+
+`uses_codex_backend` requires ChatGPT-family auth; `has_command_auth` requires
+the provider to declare an auth command (`[model_providers.X.auth]` with a
+`command`). An `env_key` provider satisfies **neither** - codex never fetches
+`/models` for it, and a `model_catalog_json` pin switches codex to the static
+in-process catalog (`StaticModelsManager`) regardless of auth. That yields the
+two supported modes, both with ready-made examples in `scripts/`.
+
+### Dynamic mode (recommended): command auth, live fetch
 
 ```toml
-# ~/.codex/config.toml
-[models]
-# model_catalog_json is NOT needed — the router serves the catalog live
+# ~/.codex/config.toml - full file: scripts/codex-config-dynamic.toml.example
+model = "deepseek/deepseek-v4-flash"
+model_provider = "codexferry"
 
 [model_providers.codexferry]
 name = "codexferry"
 base_url = "http://127.0.0.1:8787/v1"
 wire_api = "responses"
-env_key = "CODEXFERRY_DUMMY"  # any non-empty value; the proxy handles real keys
+
+[model_providers.codexferry.auth]
+command = "echo"
+args = ["dummy-token"]
 ```
 
-Set the dummy env var (Codex requires a non-empty key):
+The auth command's stdout (trimmed, non-empty) becomes the bearer token - the
+router does not authenticate clients, so a dummy echo is enough. `auth` is
+mutually exclusive with `env_key` / `experimental_bearer_token` /
+`requires_openai_auth` in codex's config schema.
 
-```bash
-export CODEXFERRY_DUMMY="dummy"
+With this wiring codex fetches the catalog on session start (cache miss),
+caches it in `~/.codex/models_cache.json` (TTL 300s, ETag revalidation), and
+merges it with its bundled models. Verified on codex 0.147.0: `codex debug
+models` lists the router routes alongside the bundled gpt models, and real
+`codex exec` turns resolve their metadata from the fetched catalog.
+
+Caveat: the `/model` picker list is a MERGE, not a replacement - non-ChatGPT
+auth cannot suppress codex's bundled models (`apply_remote_models` requires a
+ChatGPT account for replace semantics). For a pure route-only list, use
+static mode.
+
+### Static mode: generated catalog, pinned
+
+```toml
+# ~/.codex/config.toml - full file: scripts/codex-config-static.toml.example
+model = "deepseek/deepseek-v4-flash"
+model_provider = "codexferry"
+model_catalog_json = "codexferry-catalog.json"   # relative paths resolve against ~/.codex/
+
+[model_providers.codexferry]
+name = "codexferry"
+base_url = "http://127.0.0.1:8787/v1"
+wire_api = "responses"
+env_key = "CODEXFERRY_DUMMY"  # any non-empty value; export CODEXFERRY_DUMMY=dummy
 ```
 
-Codex fetches `{base_url}/models?client_version=...` once per turn and caches
-the result with ETag revalidation, so new routes appear without restarting
-either Codex or the router.
-
-Clients that do **not** send `client_version` (e.g. OpenAI-compatible
-list clients) get the original Chat-Completions list shape
-(`{"object":"list","data":[...]}`) at the same URL — unchanged from
-previous versions.
-
-### gen-catalog (offline generation)
-
-The `gen-catalog` subcommand still exists for users who want a static
-`model_catalog_json` file (e.g. for `doctor` offline checks or if they
-cannot point Codex at the router):
+Generate the pinned file with `gen-catalog` and regenerate it whenever you add
+routes or upgrade Codex:
 
 ```bash
 codexferry gen-catalog \
-  --config config.toml \
+  --config cxf.toml \
   --out ~/.codex/codexferry-catalog.json
 ```
+
+The trade-off: unlike the live endpoint, a generated file is a snapshot.
+Adding a route to `cxf.toml` hot-reloads the daemon, but Codex keeps the old
+model list until you re-run `gen-catalog` and restart Codex.
+
+**If you end up with neither** (env_key wiring, no pin): requests still work -
+routing, streaming and tool calls are unaffected, because the route name is
+passed through to codexferry regardless. But Codex has no metadata for the
+route, so it falls back to built-in defaults and warns:
+
+```
+Model metadata for `deepseek/deepseek-v4-pro` not found. Defaulting to fallback
+metadata; this can degrade performance and cause issues.
+```
+
+In practice that means a generic context window and generic prompt/reasoning
+settings instead of the ones your config declares (`context_window`, the
+inherited `base_instructions`, the reasoning ladder) - usable for a quick test,
+not what you want day to day.
+
+
+### Clients that do call `/v1/models`
+
+Clients that send `client_version` get the Codex `ModelsResponse` catalog,
+built live from the current config with ETag revalidation — no restart needed
+after a config edit. Clients that do **not** send `client_version` (e.g.
+plain OpenAI-compatible list clients) get the Chat-Completions list shape
+(`{"object":"list","data":[...]}`) at the same URL. Both shapes are supported
+and tested; a codex wired with command auth (dynamic mode above) hits the
+`client_version` shape on its own, no sniffer required.
+
+### gen-catalog template search
 
 **Template search** (for inheriting fields like `base_instructions`):
 
@@ -318,11 +384,11 @@ wire.
 ```bash
 # Offline (default): regenerate the catalog and deep-compare with the
 # installed one, detecting any drift
-codexferry doctor --config config.toml
+codexferry doctor --config cxf.toml
 
 # Live: in-process mock upstream + temporary router + real `codex exec`,
 # asserting the normalized wire shape and a full tool round-trip (offline, zero tokens)
-codexferry doctor --live --config config.toml
+codexferry doctor --live --config cxf.toml
 ```
 
 Exit codes: 0 all pass; 1 a check failed; 2 environment unusable (e.g. codex
@@ -333,8 +399,8 @@ not installed).
 ```bash
 cargo build --release
 # If not pointing Codex at the router for live catalog, generate statically:
-# ./target/release/codexferry gen-catalog --out ~/.codex/codexferry-catalog.json --config config.toml
-./target/release/codexferry doctor --live --config config.toml
+# ./target/release/codexferry gen-catalog --out ~/.codex/codexferry-catalog.json --config cxf.toml
+./target/release/codexferry doctor --live --config cxf.toml
 ```
 
 The "dropped N template field(s)" line in the generation log and doctor's INFO
@@ -352,7 +418,7 @@ After=network.target
 [Service]
 Type=simple
 ExecStart=/path/to/codexferry
-Environment=CODEXFERRY_CONFIG=/etc/codexferry/config.toml
+Environment=CODEXFERRY_CONFIG=/etc/codexferry/cxf.toml
 Environment=DEEPSEEK_API_KEY=sk-your-key
 KillSignal=SIGTERM
 Restart=on-failure

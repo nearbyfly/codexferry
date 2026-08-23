@@ -323,14 +323,16 @@ Turn 2: codex -m ark/glm-5.2  (switch provider!)
 ```
 codexferry/
 ├── Cargo.toml
-├── config.toml.example
+├── cxf.toml.example         # Router config template (real cxf.toml is gitignored)
 ├── AGENTS.md               # AI agent notes
 ├── ARCHITECTURE.md         # This file
 ├── README.md               # User guide
 ├── scripts/
 │   ├── e2e-lib.sh           # E2E shared helpers: sandbox selection + run_codex (181)
 │   ├── e2e.sh               # deterministic E2E layer: basic/models/tools/multiturn (193)
-│   └── e2e-real.sh          # opt-in real-provider smoke; refuses sandbox bypass (91)
+│   ├── e2e-real.sh          # opt-in real-provider smoke; refuses sandbox bypass (91)
+│   ├── codex-config-dynamic.toml.example  # Codex CLI side: live /models catalog via auth.command
+│   └── codex-config-static.toml.example   # Codex CLI side: pinned gen-catalog file
 ├── docs/superpowers/
 │   └── specs/              # Migration spec (the original design spec and plan
 │                           #   live in the retained codex-router-rs repo)
