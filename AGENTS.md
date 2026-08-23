@@ -182,7 +182,12 @@ logged from the handler. Do not add extra per-request log lines. The documented
 anomaly-only `warn!` exceptions (they fire on genuine anomalies, never on a
 healthy request): the `missing_done` quirk/truncation warns in the chat stream
 task, the streaming idle-timeout warns, and the non-2xx upstream body warn
-(body truncated to 1KB via `truncate_for_log`). Log level is controlled via
+(body truncated to 1KB via `truncate_for_log`). One more exception is the
+version tripwire's `observe_client_version` info/warn: they are once-per-
+distinct-version event logs (per daemon process, not per request) fired on the
+first `/models` request carrying a given `client_version` — the info announces
+`codex client {from} → {to} detected`, and the warn follows when that version
+is not verified green in doctor's state file. Log level is controlled via
 `RUST_LOG`; `CODEXFERRY_TRACE_BODY=1` adds debug body tracing.
 
 ### 12. `/models` is dual-shape
@@ -246,8 +251,9 @@ Codex CLI ──POST /v1/responses──▶ axum daemon (127.0.0.1:8787)
 | `session.rs` | `SessionStore`: in-memory, TTL, LRU eviction |
 | `catalog.rs` | `gen-catalog` + `build_catalog_value` shared with the live /models endpoint |
 | `models_cache.rs` | `CatalogCache`: route-fingerprint + template-mtime invalidation for live /models |
-| `doctor.rs` | doctor subcommand: offline catalog drift check (regenerate-and-compare), report/exit codes |
-| `doctor_live.rs` | doctor --live: in-process mock upstream + temp router + wire-shape/tool-round-trip probe |
+| `mode.rs` | codex catalog-wiring mode detection (pinned/dynamic/fallback) from `~/.codex/config.toml` (`detect_mode` + `DEFAULT_ACTIVE_PROVIDER`) |
+| `doctor.rs` | doctor subcommand: mode-aware offline quick-checks (L1–L2 + mode-keyed advisories; pinned L2.7–L2.10 pin checks; dynamic L2.7'–L2.9' endpoint smoke/shape), WARN/INFO/FAIL report + exit codes |
+| `doctor_live.rs` | doctor --live: mode-aware L3 live probe (probe wiring mirrors the detected mode; live-catalog-fetch proof via codex `models_cache.json`; returns checks for the combined default output) |
 | `logging.rs` | tracing-subscriber init |
 | `metrics.rs` | `Metrics`: Prometheus registry + `/metrics` encoding (upstream requests, tokens, latency, in-flight) |
 | `normalize.rs` | boundary normalization: additional_tools hoist, chat namespace flattening + encode/decode map, unknown-type visibility + counters |
@@ -272,6 +278,9 @@ Codex CLI ──POST /v1/responses──▶ axum daemon (127.0.0.1:8787)
 - **E2E scripts** (`scripts/e2e.sh`, `scripts/e2e-real.sh`) drive the real
   Codex CLI against a scripted mock (`src/bin/e2e-mock.rs`) or real upstreams.
   They are manual tools outside `cargo test`; see README "End-to-End Tests".
+- The default `codexferry doctor` run composes L1 + L2 offline checks then the
+  L3 live probe into one report; `--offline` / `--live` select the stages
+  (see `docs/superpowers/specs/2026-08-23-mode-aware-doctor-design.md`).
 - Integration tests bind to ephemeral ports with a TOCTOU retry (see `setup()`).
 - Env-mutating tests use an `EnvGuard` RAII guard to clean up on panic.
 
