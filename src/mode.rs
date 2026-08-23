@@ -12,17 +12,33 @@ pub enum Mode {
     /// No pin, provider has `[X.auth] command`: codex fetches `/v1/models`
     /// each session start (`OpenAiModelsManager`, `has_command_auth` gate).
     Dynamic,
-    /// No pin, only `env_key`: codex falls through with default metadata
-    /// (degraded; warn + recommend migration).
+    /// No pin and no auth command (typically env_key-only): codex falls
+    /// through with default metadata (degraded; warn + recommend migration).
     Fallback,
 }
 
+/// Default active provider, mirroring codex's default `model_provider`.
 pub const DEFAULT_ACTIVE_PROVIDER: &str = "codexferry";
 
+/// Detect the catalog wiring mode from a codex TOML config.
+///
+/// The caller resolves and passes the active provider (default
+/// `DEFAULT_ACTIVE_PROVIDER`). `None` text or a TOML parse failure degrades
+/// to `Fallback`; a top-level string `model_catalog_json` takes priority and
+/// yields `Pinned`; otherwise a string `[model_providers.{active}].auth.command`
+/// yields `Dynamic`; anything else is `Fallback`.
 pub fn detect_mode(codex_toml_text: Option<&str>, active_provider: &str) -> Mode {
-    let Some(text) = codex_toml_text else { return Mode::Fallback; };
-    let Ok(val) = text.parse::<Value>() else { return Mode::Fallback; };
-    if val.get("model_catalog_json").and_then(Value::as_str).is_some() {
+    let Some(text) = codex_toml_text else {
+        return Mode::Fallback;
+    };
+    let Ok(val) = text.parse::<Value>() else {
+        return Mode::Fallback;
+    };
+    if val
+        .get("model_catalog_json")
+        .and_then(Value::as_str)
+        .is_some()
+    {
         return Mode::Pinned;
     }
     let provider = val
@@ -30,8 +46,12 @@ pub fn detect_mode(codex_toml_text: Option<&str>, active_provider: &str) -> Mode
         .and_then(Value::as_table)
         .and_then(|t| t.get(active_provider))
         .and_then(Value::as_table);
-    if provider.and_then(|t| t.get("auth")).and_then(Value::as_table)
-        .and_then(|t| t.get("command")).and_then(Value::as_str).is_some()
+    if provider
+        .and_then(|t| t.get("auth"))
+        .and_then(Value::as_table)
+        .and_then(|t| t.get("command"))
+        .and_then(Value::as_str)
+        .is_some()
     {
         return Mode::Dynamic;
     }
@@ -56,7 +76,10 @@ mod tests {
             command = "echo"
             args = ["dummy"]
         "#;
-        assert_eq!(detect_mode(Some(toml), DEFAULT_ACTIVE_PROVIDER), Mode::Pinned);
+        assert_eq!(
+            detect_mode(Some(toml), DEFAULT_ACTIVE_PROVIDER),
+            Mode::Pinned
+        );
     }
 
     #[test]
@@ -70,7 +93,10 @@ mod tests {
             command = "echo"
             args = ["dummy"]
         "#;
-        assert_eq!(detect_mode(Some(toml), DEFAULT_ACTIVE_PROVIDER), Mode::Dynamic);
+        assert_eq!(
+            detect_mode(Some(toml), DEFAULT_ACTIVE_PROVIDER),
+            Mode::Dynamic
+        );
     }
 
     #[test]
@@ -81,7 +107,10 @@ mod tests {
             base_url = "http://127.0.0.1:8787/v1"
             env_key = "DUMMY"
         "#;
-        assert_eq!(detect_mode(Some(toml), DEFAULT_ACTIVE_PROVIDER), Mode::Fallback);
+        assert_eq!(
+            detect_mode(Some(toml), DEFAULT_ACTIVE_PROVIDER),
+            Mode::Fallback
+        );
     }
 
     #[test]
@@ -91,7 +120,10 @@ mod tests {
 
     #[test]
     fn unparseable_text_is_fallback() {
-        assert_eq!(detect_mode(Some("not valid toml [[["), DEFAULT_ACTIVE_PROVIDER), Mode::Fallback);
+        assert_eq!(
+            detect_mode(Some("not valid toml [[["), DEFAULT_ACTIVE_PROVIDER),
+            Mode::Fallback
+        );
     }
 
     #[test]
