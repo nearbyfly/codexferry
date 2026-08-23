@@ -329,7 +329,7 @@ codexferry/
 ├── BUILD.md                # Build, test, and e2e commands (split out of README)
 ├── README.md               # User guide (usage + static/dynamic catalog intro)
 ├── scripts/
-│   ├── e2e-lib.sh           # E2E shared helpers: sandbox selection + run_codex + doctor assertions (335)
+│   ├── e2e-lib.sh           # E2E shared helpers: sandbox selection + run_codex + doctor assertions (336)
 │   ├── e2e.sh               # deterministic E2E layer: basic/models/tools/multiturn + doctor scenarios (443)
 │   ├── e2e-real.sh          # opt-in real-provider smoke; refuses sandbox bypass (140)
 │   ├── codex-config-dynamic.toml.example  # Codex CLI side: live /models catalog via auth.command (47)
@@ -396,6 +396,6 @@ codexferry/
 > Line counts are approximate and include comments; they drift as the code evolves.
 > Update them when making significant changes.
 
-~22,635 lines total across the scripts/, src/ and tests/ files above. 406 tests
-(365 unit + 5 e2e-mock unit + 35 integration passing + 1 ignored live-probe
+~22,636 lines total across the scripts/, src/ and tests/ files above. 411 tests
+(370 unit + 5 e2e-mock unit + 35 integration passing + 1 ignored live-probe
 test).

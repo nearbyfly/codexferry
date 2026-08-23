@@ -502,6 +502,11 @@ mode:
 Exit codes: 0 all pass; 1 a check failed; 2 environment unusable (codex not
 installed or unrunnable — raised by the live path).
 
+Live-involving runs (default or `--live`) persist the outcome to
+`~/.local/state/codexferry/doctor.json`: a green run records `last_green` (the
+normalized codex version) and `last_run`; a red run records `last_run` while
+preserving `last_green`. `--offline` never writes the state file.
+
 ### Failure bisection
 
 | Observed failure | Diagnosis | Fix layer | Remediation snippet |
