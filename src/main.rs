@@ -13,10 +13,10 @@
 //!   Codex `model_catalog_json` file (see [`catalog::run_gen_catalog`]) so
 //!   the Codex TUI knows about the proxy's `provider/alias` models.
 //! * **`doctor` subcommand** — contract health check (upgrade tripwire):
-//!   offline it regenerates the catalog in memory and deep-compares it with
-//!   the installed one, reporting drift as FAIL; `--live` additionally
-//!   drives the installed Codex CLI through a temporary router (see
-//!   [`doctor::run_doctor`]).
+//!   offline it runs the mode-aware quick-checks (config loads, router
+//!   routes, template dropped-field tripwire, mode classification, Codex
+//!   wiring, version status — see [`doctor::run_doctor`]); `--live`
+//!   additionally drives the installed Codex CLI through a temporary router.
 //!
 //! Logging is initialized lazily inside [`proxy::run`] (see `logging.rs`).
 //! The `gen-catalog` path also installs a tracing subscriber — Once-guarded
@@ -101,17 +101,19 @@ enum Commands {
 
     /// Check router ↔ Codex contract health (upgrade tripwire).
     ///
-    /// Offline mode (default) verifies the installed model catalog matches a
-    /// fresh regeneration. `--live` additionally drives the installed Codex
-    /// CLI through a temporary in-process router + mock upstream and asserts
+    /// Offline mode (default) runs the mode-aware quick-checks (config
+    /// loads, router routes, mode classification, Codex wiring, version
+    /// status). `--live` additionally drives the installed Codex CLI
+    /// through a temporary in-process router + mock upstream and asserts
     /// the normalized wire shape and a full tool round-trip.
     Doctor {
         /// Path to the router TOML config (defaults to CODEXFERRY_CONFIG
         /// or ./cxf.toml, same rule as the server).
         #[arg(long)]
         config: Option<PathBuf>,
-        /// Path to the installed catalog JSON
-        /// (defaults to ~/.codex/codexferry-catalog.json).
+        /// Path to the installed catalog JSON (accepted for compatibility
+        /// with older invocations; ignored — the offline checks no longer
+        /// compare against an installed catalog).
         #[arg(long)]
         catalog: Option<PathBuf>,
         /// Optional explicit path to a Codex `models.json` template to
@@ -152,17 +154,12 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(Commands::Doctor {
             config,
-            catalog,
+            catalog: _,
             codex_models,
             live,
         }) => {
             let config_path = config.unwrap_or_else(crate::config::default_config_path);
-            doctor::run_doctor(
-                &config_path,
-                catalog.as_deref(),
-                codex_models.as_deref(),
-                live,
-            )?;
+            doctor::run_doctor(&config_path, codex_models.as_deref(), live)?;
         }
         None => {
             // Server mode: init logging, load config, spawn watcher, serve.
