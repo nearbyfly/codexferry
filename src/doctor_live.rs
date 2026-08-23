@@ -15,8 +15,18 @@
 //! finds nothing and the probe fails loudly instead of leaking markup.
 //! The tool call touches a sentinel file, proving the full round-trip
 //! (model → router → codex → local execution → tool output back upstream).
+//!
+//! The probe wiring mirrors the user's ACTUAL codex mode (spec
+//! 2026-08-23 §Mode detection): `run()` reads `~/.codex/config.toml` and
+//! dispatches on [`crate::mode::Mode`] — dynamic uses an `auth.command`
+//! (codex fetches `/v1/models` live from the in-process router), pinned
+//! pins the generated catalog, fallback (env_key only, no pin) is the
+//! degraded metadata path. The live-fetch assertion is the codex-side
+//! equivalent of the spec's router-log line: `models_cache.json` appears
+//! in codex's CODEX_HOME only after a successful `/v1/models` fetch.
 
 use crate::doctor::{print_report, report_has_fail, Check};
+use crate::mode::{self, Mode};
 use axum::routing::post;
 use axum::Router;
 use serde_json::{json, Value};
@@ -29,9 +39,15 @@ use crate::normalize::KNOWN_INPUT_ITEM_TYPES;
 
 /// Live-probe entry point: runs both routes, prints the report, exits 1/2.
 ///
-/// The `config_path` argument is intentionally unused: the probe is
-/// self-contained (temp workspace + temp config pointing at the mock), so
-/// the user's own config never matters here.
+/// Detects the user's wiring mode from `~/.codex/config.toml` (spec
+/// 2026-08-23 §Mode detection) and threads it into the probe so the probe
+/// tests what the user actually runs. Dynamic mode uses an auth command and
+/// no pin (codex fetches `/v1/models` live); pinned mode pins the generated
+/// temp catalog; fallback uses env_key only and is the degraded path. The
+/// `config_path` argument — codexferry's own config — stays unused by the
+/// probe itself (it generates its own temp router config), but the probe
+/// wiring now depends on the real `~/.codex/config.toml` via the detected
+/// mode.
 pub fn run(_config_path: &Path) -> anyhow::Result<()> {
     // TODO(spec §3.2 item 6): on failure print last 20 lines of router log.
     // The in-process router installs no tracing subscriber → no router logs.
@@ -50,14 +66,31 @@ pub fn run(_config_path: &Path) -> anyhow::Result<()> {
         eprintln!("environment: `codex` not found or not runnable on PATH (doctor --live needs the Codex CLI)");
         std::process::exit(2);
     }
+    // Resolve the user's actual mode (spec §Mode detection): top-level
+    // `model_provider` selects the provider table (default
+    // DEFAULT_ACTIVE_PROVIDER). A missing or unparseable
+    // `~/.codex/config.toml` degrades to `Mode::Fallback` — consistent
+    // with `crate::mode::detect_mode` — so the live probe still runs, only
+    // with the degraded wiring.
+    let codex_toml = std::fs::read_to_string(default_codex_config_path()).ok();
+    let active_provider = codex_toml
+        .as_deref()
+        .and_then(|text| text.parse::<toml::Value>().ok())
+        .and_then(|val| {
+            val.get("model_provider")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| mode::DEFAULT_ACTIVE_PROVIDER.to_string());
+    let mode = mode::detect_mode(codex_toml.as_deref(), &active_provider);
     // `main` is `#[tokio::main]`, so the calling thread is already inside a
     // tokio runtime; a nested `Runtime::new()` would panic with "Cannot
     // start a runtime from within a runtime". Run the probe on a fresh OS
     // thread with its own runtime instead — the probe is fully
     // self-contained (own mock server, router, client).
-    let probe = std::thread::spawn(|| {
+    let probe = std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new()?;
-        rt.block_on(probe_both_routes())
+        rt.block_on(probe_both_routes(mode))
     });
     let checks = match probe.join() {
         Ok(Ok(checks)) => checks,
@@ -71,7 +104,20 @@ pub fn run(_config_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn probe_both_routes() -> anyhow::Result<Vec<Check>> {
+/// Default Codex config location: `$HOME/.codex/config.toml`. Same home
+/// resolution rule as `doctor.rs`: `HOME`, falling back to `USERPROFILE`
+/// on Windows.
+fn default_codex_config_path() -> PathBuf {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_default();
+    PathBuf::from(home).join(".codex").join("config.toml")
+}
+
+/// Run both probe routes (responses passthrough + chat conversion)
+/// against the mode-appropriate wiring, collecting the shape/round-trip
+/// checks plus the codex-side live-catalog-fetch proof for each route.
+async fn probe_both_routes(mode: Mode) -> anyhow::Result<Vec<Check>> {
     println!("[1/6] preparing temp workspace");
     let dir = tempfile::tempdir()?;
     let sentinel_dir = dir.path().to_path_buf();
@@ -162,10 +208,11 @@ timeout_ms = 60000
         let sentinel = sentinel_dir.join(format!("sentinel-{endpoint}.touched"));
         let _ = std::fs::remove_file(&sentinel);
         let outcome =
-            run_codex_probe_with_deadline(route, &catalog_path, router_port, CODEX_PROMPT);
+            run_codex_probe_with_deadline(mode, route, &catalog_path, router_port, CODEX_PROMPT);
         checks.extend(shape_checks(&mock, endpoint, "doctor-upstream"));
         checks.push(sentinel_check(&sentinel));
         checks.push(exit_check(&outcome));
+        checks.push(live_catalog_check(mode, &outcome));
     }
 
     println!("[6/6] shutting down");
@@ -409,11 +456,16 @@ fn chat_text_sse(text: &str) -> String {
 struct ProbeOutcome {
     success: bool,
     stderr_tail: String,
+    /// Whether codex wrote `models_cache.json` in its probe CODEX_HOME —
+    /// the codex-side live-catalog fetch proof (false on timeout, where the
+    /// child may still be running and the cache may appear later).
+    models_cache_fetched: bool,
 }
 
 /// Run one `codex exec` probe on a blocking thread with a 90s deadline
 /// (codex startup + two rounds); a timeout yields a failed outcome instead
-/// of hanging the report.
+/// of hanging the report. `mode` selects the probe's auth/catalog wiring
+/// (spec 2026-08-23 §Mode detection).
 ///
 /// DELIBERATE DEVIATION from spec §3.2 ("kill the process group on
 /// timeout"): on a 90s timeout the spawned `codex exec` process is NOT
@@ -421,6 +473,7 @@ struct ProbeOutcome {
 /// path also intentionally leaves that probe's CODEX_HOME in place — the
 /// child may still be running and needs the directory to exist.
 fn run_codex_probe_with_deadline(
+    mode: Mode,
     route: &str,
     catalog_path: &Path,
     router_port: u16,
@@ -430,18 +483,35 @@ fn run_codex_probe_with_deadline(
     let route = route.to_string();
     let catalog_path = catalog_path.to_path_buf();
     std::thread::spawn(move || {
-        let _ = tx.send(run_codex_probe(&route, &catalog_path, router_port, prompt));
+        let _ = tx.send(run_codex_probe(
+            mode,
+            &route,
+            &catalog_path,
+            router_port,
+            prompt,
+        ));
     });
     match rx.recv_timeout(std::time::Duration::from_secs(90)) {
         Ok(outcome) => outcome,
         Err(_) => ProbeOutcome {
             success: false,
             stderr_tail: "codex probe timed out after 90s".into(),
+            models_cache_fetched: false,
         },
     }
 }
 
+/// Run one `codex exec` probe against the in-process router with
+/// mode-appropriate wiring: dynamic uses an `auth.command` (codex fetches
+/// `/v1/models` live, no pin), pinned uses env_key + the generated catalog
+/// pin, fallback uses env_key only (no pin — degraded metadata path).
+/// Everything else is identical across modes: base_url, wire_api=responses,
+/// approval_policy=never, sandbox_mode=danger-full-access,
+/// model_reasoning_effort=low, `-m route`, prompt, scratch CODEX_HOME and
+/// the `DOCTOR_CODEX_KEY=dummy` env (the router does not authenticate
+/// clients; the dummy key satisfies codex's env_key auth).
 fn run_codex_probe(
+    mode: Mode,
     route: &str,
     catalog_path: &Path,
     router_port: u16,
@@ -449,8 +519,8 @@ fn run_codex_probe(
 ) -> ProbeOutcome {
     let home = std::env::temp_dir().join(format!("doctor-home-{}", uuid::Uuid::new_v4().simple()));
     std::fs::create_dir_all(&home).unwrap();
-    let output = std::process::Command::new("codex")
-        .arg("exec")
+    let mut cmd = std::process::Command::new("codex");
+    cmd.arg("exec")
         .arg("--skip-git-repo-check")
         .arg("-c")
         .arg("model_provider=doctor")
@@ -461,12 +531,27 @@ fn run_codex_probe(
             "model_providers.doctor.base_url=http://127.0.0.1:{router_port}/v1"
         ))
         .arg("-c")
-        .arg("model_providers.doctor.env_key=DOCTOR_CODEX_KEY")
-        .arg("-c")
-        .arg("model_providers.doctor.wire_api=responses")
-        .arg("-c")
-        .arg(format!("model_catalog_json={}", catalog_path.display()))
-        .arg("-c")
+        .arg("model_providers.doctor.wire_api=responses");
+    // Mode-aware auth wiring (spec §Mode detection): dynamic uses an auth
+    // command so codex's OpenAiModelsManager fetches the live catalog;
+    // pinned/fallback providers authenticate via env_key only.
+    match mode {
+        Mode::Dynamic => {
+            cmd.arg("-c")
+                .arg("model_providers.doctor.auth={command=\"echo\",args=[\"dummy\"]}");
+        }
+        Mode::Pinned | Mode::Fallback => {
+            cmd.arg("-c")
+                .arg("model_providers.doctor.env_key=DOCTOR_CODEX_KEY");
+        }
+    }
+    // Pinned mode carries the generated temp catalog pin
+    // (StaticModelsManager); dynamic/fallback deliberately carry none.
+    if mode == Mode::Pinned {
+        cmd.arg("-c")
+            .arg(format!("model_catalog_json={}", catalog_path.display()));
+    }
+    cmd.arg("-c")
         .arg("approval_policy=never")
         .arg("-c")
         .arg("sandbox_mode=danger-full-access")
@@ -477,24 +562,68 @@ fn run_codex_probe(
         .arg(prompt)
         .env("CODEX_HOME", &home)
         .env("DOCTOR_CODEX_KEY", "dummy")
-        .stdin(std::process::Stdio::null())
-        .output();
+        .stdin(std::process::Stdio::null());
+    let output = cmd.output();
     // This function only runs on the non-timeout path (a 90s deadline
     // timeout returns from `run_codex_probe_with_deadline` without
     // consuming this result), so codex has fully exited here and CODEX_HOME
     // is no longer in use — reclaim the per-probe home. The timeout path
     // intentionally leaves the dir behind: codex may still be running and
     // needs its CODEX_HOME to exist.
+    // Record the live-catalog fetch proof BEFORE reclaiming the home:
+    // codex writes `models_cache.json` only after a successful `/v1/models`
+    // fetch, so its presence is the codex-side equivalent of the spec's
+    // router-log `codex client X detected` assertion (the in-process router
+    // installs no tracing subscriber, so no router log exists to assert).
+    let models_cache_fetched = home.join("models_cache.json").exists();
     let _ = std::fs::remove_dir_all(&home);
     match output {
         Ok(out) => ProbeOutcome {
             success: out.status.success(),
             stderr_tail: tail(&String::from_utf8_lossy(&out.stderr), 1200),
+            models_cache_fetched,
         },
         Err(e) => ProbeOutcome {
             success: false,
             stderr_tail: format!("failed to spawn codex: {e}"),
+            models_cache_fetched,
         },
+    }
+}
+
+/// Codex-side live-catalog fetch proof for one probe (spec L3 assertion,
+/// adapted to this in-process topology). Dynamic mode MUST fetch the live
+/// catalog — a missing cache means the `/v1/models` fetch is broken.
+/// Pinned/fallback modes must NOT fetch — a present cache means codex
+/// fetched despite the env_key-only/pinned wiring (an anomaly; inspect the
+/// user's config for a stray `auth.command`).
+fn live_catalog_check(mode: Mode, outcome: &ProbeOutcome) -> Check {
+    match mode {
+        Mode::Dynamic => {
+            if outcome.models_cache_fetched {
+                Check::pass("live catalog fetched", "codex wrote its models_cache.json")
+            } else {
+                Check::fail(
+                    "live catalog fetched",
+                    "the dynamic-mode /v1/models fetch is broken — check \
+                     models_cache.rs::CatalogCache::get / the router",
+                )
+            }
+        }
+        Mode::Pinned | Mode::Fallback => {
+            if outcome.models_cache_fetched {
+                Check::fail(
+                    "no live catalog fetch (pinned/fallback wiring)",
+                    "codex fetched /v1/models despite the wiring — inspect \
+                     the config for a stray auth.command",
+                )
+            } else {
+                Check::pass(
+                    "no live catalog fetch (pinned/fallback wiring)",
+                    "codex never fetched /v1/models (intended)",
+                )
+            }
+        }
     }
 }
 
