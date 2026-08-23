@@ -7,9 +7,11 @@
 //! loads (L1.1), router has routes (L1.2), template dropped-field tripwire,
 //! mode classification (L1.4), Codex-side wiring hints (L1.3), the
 //! mode-keyed pin/shadow check — the replacement for the old single
-//! `shadow_check` (spec §Mode-specific shadow_check replacement + L2.7'/
-//! L2.7'') — the pinned-mode checks (spec L2.7–L2.10: pin exists + parses,
-//! pin ⊇ router routes, pin ⊆ router routes, pin entry field shape) and
+//! `shadow_check` (spec §Mode-specific shadow_check replacement +
+//! L2.7'': static-pin INFO / fallback-wiring WARN), the pinned-mode checks
+//! (spec L2.7–L2.10: pin exists + parses, pin ⊇ router routes, pin ⊆ router
+//! routes, pin entry field shape), the dynamic-mode checks (spec L2.7'–L2.9':
+//! pin-shadow WARN, `/v1/models` endpoint smoke, endpoint catalog shape) and
 //! version status vs the persisted doctor state. Every environment-dependent
 //! input is best-effort: no `~/.codex/config.toml` or no codex on PATH
 //! degrades to INFO/WARN. The one exception is L2.7: in pinned mode an
@@ -27,6 +29,7 @@ use crate::catalog;
 use crate::mode::Mode;
 use crate::version::DoctorState;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde_json::Value;
 
@@ -199,17 +202,24 @@ pub(crate) fn offline_checks_with_env(
 /// 5. `codex wiring` (L1.3): [`wiring_check`] against this instance's bind
 ///    address.
 /// 6. `mode_keyed_check`: one mode-specific pin/shadow check (spec
-///    §Mode-specific shadow_check replacement).
+///    §Mode-specific shadow_check replacement) — static-pin INFO /
+///    fallback-wiring WARN only; the dynamic pin-shadow arm lives in
+///    [`pin_shadow_in_dynamic`] (item 8) so it cannot double-emit.
 /// 7. pinned-mode checks (spec L2.7–L2.10, only when `mode` is
 ///    [`Mode::Pinned`]): pin exists + parses, pin ⊇ router routes,
 ///    pin ⊆ router routes, and pin entry field shape.
-/// 8. `codex version status`: [`version_status`] vs the persisted state.
+/// 8. dynamic-mode checks (spec L2.7'–L2.9', only when `mode` is
+///    [`Mode::Dynamic`]): pin-shadow WARN (L2.7'), `/v1/models` endpoint
+///    smoke (L2.8') and endpoint catalog shape (L2.9') against this
+///    instance's own bind address.
+/// 9. `codex version status`: [`version_status`] vs the persisted state.
 ///
-/// L2.6 (version age) and the dynamic L2.7'–L2.9' checks are not here — they
-/// belong to later tasks. The pinned L2.7–L2.10 checks ARE here (the L2.7
-/// pin-existence check, L2.8/L2.9 reconciliation, and L2.10 field shape run
-/// in the block below); [`mode_keyed_check`] separately implements the
-/// advisory dynamic-pin L2.7' and degraded-fallback L2.7'' branches above.
+/// L2.6 (version age) is not here — it belongs to a later task. The pinned
+/// L2.7–L2.10 checks ARE here (the L2.7 pin-existence check, L2.8/L2.9
+/// reconciliation, and L2.10 field shape run in the block below);
+/// [`mode_keyed_check`] implements the static-pin INFO / degraded-fallback
+/// L2.7'' branches above, and [`pin_shadow_in_dynamic`] the dynamic-pin
+/// L2.7' WARN.
 ///
 /// `active_provider` and `codex_toml` are threaded through (rather than
 /// re-read inside) so the L1.4 detail can name the provider and L1.3 /
@@ -310,6 +320,19 @@ pub(crate) fn offline_checks_with_mode(
             }
         }
     }
+    // Dynamic-mode checks (spec L2.7'–L2.9'): the live `/v1/models` fetch
+    // enabled by `auth.command` is the catalog source, so doctor validates
+    // the pin-shadow wiring locally and smokes the endpoint codex will hit.
+    // `expected` re-read the router config above (same fallback semantics as
+    // the L1.3 wiring hint), so the endpoint checks target this instance's
+    // own bind address.
+    if mode == Mode::Dynamic {
+        if let Some(c) = pin_shadow_in_dynamic(codex_toml) {
+            checks.push(c);
+        }
+        checks.push(models_endpoint_reachable(&expected));
+        checks.push(models_endpoint_shape(&expected));
+    }
     checks.push(version_status(codex_version_output, state));
     checks
 }
@@ -371,9 +394,10 @@ pub(crate) fn wiring_check(codex_toml: Option<&str>, expected_base: &str) -> Che
 /// - pin present (`model_catalog_json` top-level, any value):
 ///   - `Mode::Pinned` → INFO confirming the pin (the file is the catalog
 ///     source in static mode);
-///   - `Mode::Dynamic` → WARN "pin shadows live fetch" (L2.7'): the pin
-///     forces `StaticModelsManager`, so the live `/v1/models` fetch enabled
-///     by `auth.command` never runs — remove the pin OR `auth.command`;
+///   - `Mode::Dynamic` → no check here: the dynamic pin-shadow WARN (L2.7')
+///     is emitted by [`pin_shadow_in_dynamic`], which the Dynamic branch of
+///     [`offline_checks_with_mode`] calls — this function must not
+///     double-emit it;
 ///   - `Mode::Fallback` → INFO: in fallback mode the pin is the only real
 ///     metadata source, keep it.
 /// - pin absent:
@@ -404,6 +428,8 @@ pub(crate) fn mode_keyed_check(codex_toml: Option<&str>, mode: Mode) -> Option<C
     // `<not a string>` fallback: a non-string pin value is still a pin
     // (it forces the static manager), but there is no path to name.
     let pin_repr = pin.as_str().unwrap_or("<not a string>");
+    // Dynamic with a pin is [`pin_shadow_in_dynamic`]'s job (see the docs
+    // above) — returning early here is what prevents double-emission.
     let (name, status, detail) = match mode {
         Mode::Pinned => (
             "static catalog pin",
@@ -411,19 +437,10 @@ pub(crate) fn mode_keyed_check(codex_toml: Option<&str>, mode: Mode) -> Option<C
             format!(
                 "model_catalog_json = {pin_repr:?} — codex reads this pin in pinned \
                  mode; re-run `codexferry gen-catalog` after adding routes or \
-                 upgrading codex"
+                upgrading codex"
             ),
         ),
-        Mode::Dynamic => (
-            "pin shadows live fetch",
-            CheckStatus::Warn,
-            format!(
-                "model_catalog_json = {pin_repr:?} — this pin shadows the live \
-                 `/v1/models` fetch enabled by `auth.command` (pin forces \
-                 StaticModelsManager, so that fetch never runs); remove the pin \
-                 OR remove `auth.command` — pick one mode"
-            ),
-        ),
+        Mode::Dynamic => return None,
         Mode::Fallback => (
             "static catalog pin",
             CheckStatus::Info,
@@ -439,6 +456,36 @@ pub(crate) fn mode_keyed_check(codex_toml: Option<&str>, mode: Mode) -> Option<C
         status,
         detail,
     })
+}
+
+/// Spec L2.7': a dynamic-mode config that ALSO carries a `model_catalog_json`
+/// pin is a silent misconfiguration — the pin forces `StaticModelsManager`,
+/// so the live `/v1/models` fetch enabled by `auth.command` never runs.
+/// Always WARN, never FAIL (the wiring still works, the user just gets
+/// stale pinned metadata), advising "remove the pin OR remove
+/// `auth.command` — pick one mode".
+///
+/// The caller has already classified the mode as [`Mode::Dynamic`]; this
+/// function only inspects the pin. Absent or unparseable `codex_toml`, or a
+/// config without a pin, emits nothing.
+pub(crate) fn pin_shadow_in_dynamic(codex_toml: Option<&str>) -> Option<Check> {
+    let text = codex_toml?;
+    let val = text.parse::<toml::Value>().ok()?;
+    let Some(pin) = val.get("model_catalog_json") else {
+        return None;
+    };
+    // `<not a string>` fallback: a non-string pin value is still a pin
+    // (it forces the static manager), but there is no path to name.
+    let pin_repr = pin.as_str().unwrap_or("<not a string>");
+    Some(Check::warn(
+        "pin shadows live fetch",
+        format!(
+            "model_catalog_json = {pin_repr:?} — this pin shadows the live \
+             `/v1/models` fetch enabled by `auth.command` (pin forces \
+             StaticModelsManager, so that fetch never runs); remove the pin \
+             OR remove `auth.command` — pick one mode"
+        ),
+    ))
 }
 
 /// The field set codex >= 0.147's `ModelInfo` requires (spec L2.10).
@@ -606,7 +653,9 @@ fn pin_matches_router(router: &crate::config::ValidatedConfig, pin: &Value) -> C
 /// entry codex rejects at session start. Returns one PASS when every entry
 /// is complete, or one FAIL per offending entry naming the missing/malformed
 /// fields and the entry's slug (a missing `slug` is identified as
-/// `<missing slug>`, a non-string `slug` as `<non-string slug>`).
+/// `<missing slug>`, a non-string `slug` as `<non-string slug>`). The
+/// per-entry field loop is shared with the dynamic-mode
+/// [`models_endpoint_shape`] via [`entry_missing_fields`].
 fn pin_field_shape(pin: &Value) -> Vec<Check> {
     let Some(models) = pin.get("models").and_then(Value::as_array) else {
         return Vec::new();
@@ -616,19 +665,8 @@ fn pin_field_shape(pin: &Value) -> Vec<Check> {
         let Some(obj) = entry.as_object() else {
             continue;
         };
-        let slug = match obj.get("slug") {
-            Some(Value::String(s)) => s.as_str(),
-            Some(_) => "<non-string slug>",
-            None => "<missing slug>",
-        };
-        let missing: Vec<&str> = REQUIRED_FIELDS
-            .iter()
-            .copied()
-            .filter(|field| match *field {
-                "slug" => !matches!(obj.get("slug"), Some(Value::String(_))),
-                _ => !obj.contains_key(*field),
-            })
-            .collect();
+        let slug = entry_slug_label(obj);
+        let missing = entry_missing_fields(obj);
         if !missing.is_empty() {
             checks.push(Check::fail(
                 "pin entry shape",
@@ -646,6 +684,168 @@ fn pin_field_shape(pin: &Value) -> Vec<Check> {
         )]
     } else {
         checks
+    }
+}
+
+/// The [`REQUIRED_FIELDS`] of one `models[]` entry that are missing or
+/// malformed. `slug` is the only special-cased field: a present-but-
+/// non-string `slug` counts as missing because codex's `ModelInfo`
+/// deserialization rejects it at session start — `contains_key` alone would
+/// false-green such an entry. Shared by [`pin_field_shape`] and
+/// [`models_endpoint_shape`] so the two catalog sources cannot drift.
+fn entry_missing_fields(obj: &serde_json::Map<String, Value>) -> Vec<&str> {
+    REQUIRED_FIELDS
+        .iter()
+        .copied()
+        .filter(|field| match *field {
+            "slug" => !matches!(obj.get("slug"), Some(Value::String(_))),
+            _ => !obj.contains_key(*field),
+        })
+        .collect()
+}
+
+/// A human-readable slug label for a `models[]` entry, used in shape FAIL
+/// details: the string slug itself, `<non-string slug>` for a present-but-
+/// malformed `slug`, or `<missing slug>` when the key is absent.
+fn entry_slug_label(obj: &serde_json::Map<String, Value>) -> &str {
+    match obj.get("slug") {
+        Some(Value::String(s)) => s.as_str(),
+        Some(_) => "<non-string slug>",
+        None => "<missing slug>",
+    }
+}
+
+/// One GET `<base>/v1/models?client_version=doctor-l2` (the sample Codex
+/// fetch), returning the HTTP status and raw body.
+///
+/// `main` is `#[tokio::main]`, so the offline doctor path runs inside a
+/// tokio runtime — a nested `Runtime::new()` would panic ("Cannot start a
+/// runtime from within a runtime"). Mirror `doctor_live.rs`: run each GET on
+/// a fresh OS thread with its own tokio current-thread runtime, apply a 5s
+/// timeout around both the header phase and the body read, then `join()`.
+/// A connect failure and a timeout both surface as a FAIL via the returned
+/// error string.
+fn fetch_models(base_url: &str) -> Result<(u16, String), String> {
+    let url = format!("{base_url}/models?client_version=doctor-l2");
+    let join = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("tokio runtime: {e}"))?;
+        rt.block_on(async move {
+            let client = reqwest::Client::new();
+            let resp = tokio::time::timeout(
+                Duration::from_secs(5),
+                client.get(&url).send(),
+            )
+            .await
+            .map_err(|_| "timeout after 5s".to_string())?
+            .map_err(|e| format!("request failed: {e}"))?;
+            let status = resp.status().as_u16();
+            let bytes = tokio::time::timeout(Duration::from_secs(5), resp.bytes())
+                .await
+                .map_err(|_| "timeout after 5s reading the body".to_string())?
+                .map_err(|e| format!("body read failed: {e}"))?;
+            Ok((status, String::from_utf8_lossy(&bytes).into_owned()))
+        })
+    });
+    join.join()
+        .map_err(|_| "request thread panicked".to_string())?
+}
+
+/// Spec L2.8': offline smoke that the daemon's `/v1/models` endpoint responds
+/// at all — the dynamic-mode class-3 endpoint must not 500 before codex sees
+/// it. GET `<base>/v1/models?client_version=doctor-l2`; PASS on a 2xx status,
+/// FAIL on a non-2xx status, a connect failure, or a >5s timeout.
+/// Remediation on FAIL: start the daemon / check
+/// `models_cache.rs::CatalogCache::get` (the server-side catalog path).
+pub(crate) fn models_endpoint_reachable(base_url: &str) -> Check {
+    const NAME: &str = "models endpoint reachable";
+    match fetch_models(base_url) {
+        Ok((status, _)) if (200..300).contains(&status) => {
+            Check::pass(NAME, format!("GET /v1/models returned HTTP {status}"))
+        }
+        Ok((status, _)) => Check::fail(
+            NAME,
+            format!(
+                "GET /v1/models returned HTTP {status} — the dynamic-mode catalog \
+                 endpoint is down; start the daemon / check \
+                 `models_cache.rs::CatalogCache::get` (the server-side catalog path)"
+            ),
+        ),
+        Err(e) => Check::fail(
+            NAME,
+            format!(
+                "GET /v1/models failed: {e} — the dynamic-mode catalog endpoint is \
+                 down; start the daemon / check `models_cache.rs::CatalogCache::get` \
+                 (the server-side catalog path)"
+            ),
+        ),
+    }
+}
+
+/// Spec L2.9': the offline part of class 3 — the response to the same GET as
+/// [`models_endpoint_reachable`] must be catalog-shaped. Parses the body as
+/// JSON and asserts a `models` array whose entries carry every
+/// [`REQUIRED_FIELDS`] field (the same set [`pin_field_shape`] asserts in
+/// pinned mode). FAIL on a fetch failure, a non-2xx response, a parse error,
+/// or a missing/malformed required field; PASS names the entry count. This
+/// catches our own catalog output regression before codex has to.
+pub(crate) fn models_endpoint_shape(base_url: &str) -> Check {
+    const NAME: &str = "models endpoint shape";
+    let (status, body) = match fetch_models(base_url) {
+        Ok(fetched) => fetched,
+        Err(e) => {
+            return Check::fail(
+                NAME,
+                format!("GET /v1/models failed: {e} — cannot verify the catalog shape"),
+            );
+        }
+    };
+    if !(200..300).contains(&status) {
+        return Check::fail(
+            NAME,
+            format!("GET /v1/models returned HTTP {status}; cannot verify the catalog shape"),
+        );
+    }
+    let Ok(val) = serde_json::from_str::<Value>(&body) else {
+        return Check::fail(NAME, "response is not valid JSON");
+    };
+    let Some(models) = val.get("models").and_then(Value::as_array) else {
+        return Check::fail(
+            NAME,
+            "response has no `models` array (not a catalog response)",
+        );
+    };
+    let mut offenders: Vec<String> = Vec::new();
+    for (i, entry) in models.iter().enumerate() {
+        let Some(obj) = entry.as_object() else {
+            offenders.push(format!("models[{i}] is not an object"));
+            continue;
+        };
+        let missing = entry_missing_fields(obj);
+        if !missing.is_empty() {
+            offenders.push(format!(
+                "{:?} missing {}",
+                entry_slug_label(obj),
+                missing.join(", ")
+            ));
+        }
+    }
+    if offenders.is_empty() {
+        Check::pass(
+            NAME,
+            format!("all {} entries have the required fields", models.len()),
+        )
+    } else {
+        Check::fail(
+            NAME,
+            format!(
+                "{} entry(ies) missing required fields: {}",
+                offenders.len(),
+                offenders.join("; ")
+            ),
+        )
     }
 }
 
@@ -743,6 +943,31 @@ command = "echo"
 args = ["dummy"]
 "#;
 
+    /// A dynamic-mode codex TOML pointing at a caller-chosen base URL:
+    /// `auth.command` present, no pin, `model_provider` = codexferry (so
+    /// `detect_mode` classifies it Dynamic).
+    fn dynamic_codex_toml(base_url: &str) -> String {
+        format!(
+            "model_provider = \"codexferry\"\n\
+             \n\
+             [model_providers.codexferry]\n\
+             base_url = \"{base_url}\"\n\
+             wire_api = \"responses\"\n\
+             [model_providers.codexferry.auth]\n\
+             command = \"echo\"\n\
+             args = [\"dummy\"]\n"
+        )
+    }
+
+    /// The route-bearing subset of CONFIG plus a `[server] port` pointing at
+    /// a test stub, so the expected Codex-side base (and the dynamic
+    /// endpoint checks) target the stub instead of the default 8787.
+    fn write_config_on_port(dir: &std::path::Path, port: u16) -> std::path::PathBuf {
+        let p = dir.join("config.toml");
+        std::fs::write(&p, format!("[server]\nport = {port}\n\n{CONFIG}")).unwrap();
+        p
+    }
+
     /// The environment a machine without `~/.codex/`, without codex on PATH
     /// and without a doctor state file presents. Tests drive the injected
     /// entry points with this so they never read the developer's real
@@ -755,10 +980,13 @@ args = ["dummy"]
     fn quick_checks_never_fail_on_a_good_dynamic_config() {
         let dir = tempfile::tempdir().unwrap();
         let (_, version, state) = no_env();
+        // The dynamic branch smokes /v1/models, so the router config must
+        // point at a stub that answers (a dead default 8787 would FAIL).
+        let (base, port) = spawn_models_stub(200, &catalog_body(&["x/model-a"]));
         let checks = offline_checks_with_env(
-            &write_config(dir.path()),
+            &write_config_on_port(dir.path(), port),
             None,
-            Some(DYNAMIC_CODEX_TOML),
+            Some(&dynamic_codex_toml(&base)),
             version,
             &state,
         );
@@ -878,18 +1106,6 @@ model_catalog_json = "/tmp/pinned.json"
 base_url = "http://127.0.0.1:8787/v1"
 "#;
 
-    /// L2.7': dynamic mode + pin is a shadow — WARN, and a WARN never fails.
-    #[test]
-    fn dynamic_pin_warns_pin_shadows_live_fetch() {
-        let c = mode_keyed_check(Some(PIN_TOML), Mode::Dynamic).unwrap();
-        assert!(matches!(c.status, CheckStatus::Warn), "{c:?}");
-        assert_eq!(c.name, "pin shadows live fetch");
-        assert!(c.detail.contains("shadows"), "{c:?}");
-        assert!(c.detail.contains("/tmp/pinned.json"), "{c:?}");
-        // WARN must not fail the run.
-        assert!(!report_has_fail(&[c]));
-    }
-
     #[test]
     fn pinned_pin_confirms_static_catalog() {
         let c = mode_keyed_check(Some(PIN_TOML), Mode::Pinned).unwrap();
@@ -930,6 +1146,14 @@ env_key = "DUMMY"
         assert!(mode_keyed_check(Some(DYNAMIC_CODEX_TOML), Mode::Dynamic).is_none());
     }
 
+    /// The dynamic pin-shadow arm moved to [`pin_shadow_in_dynamic`];
+    /// `mode_keyed_check` must NOT emit it here, or
+    /// `offline_checks_with_mode`'s Dynamic branch would double-report.
+    #[test]
+    fn mode_keyed_check_never_emits_the_dynamic_pin_warn() {
+        assert!(mode_keyed_check(Some(PIN_TOML), Mode::Dynamic).is_none());
+    }
+
     #[test]
     fn pinned_without_pin_emits_nothing() {
         let toml = r#"
@@ -949,11 +1173,37 @@ base_url = "http://127.0.0.1:8787/v1"
         assert!(mode_keyed_check(Some("not toml [[["), Mode::Fallback).is_none());
     }
 
+    // ---- pin_shadow_in_dynamic (spec L2.7') ----
+
+    /// L2.7': dynamic mode + pin is a shadow — WARN, and a WARN never fails.
+    #[test]
+    fn dynamic_pin_warns_pin_shadows_live_fetch() {
+        let c = pin_shadow_in_dynamic(Some(PIN_TOML)).unwrap();
+        assert!(matches!(c.status, CheckStatus::Warn), "{c:?}");
+        assert_eq!(c.name, "pin shadows live fetch");
+        assert!(c.detail.contains("shadows"), "{c:?}");
+        assert!(c.detail.contains("/tmp/pinned.json"), "{c:?}");
+        assert!(c.detail.contains("remove the pin"), "{c:?}");
+        // WARN must not fail the run.
+        assert!(!report_has_fail(&[c]));
+    }
+
+    #[test]
+    fn pin_shadow_in_dynamic_emits_nothing_without_a_pin() {
+        assert!(pin_shadow_in_dynamic(Some(DYNAMIC_CODEX_TOML)).is_none());
+    }
+
+    #[test]
+    fn pin_shadow_in_dynamic_skips_absent_or_unparseable_toml() {
+        assert!(pin_shadow_in_dynamic(None).is_none());
+        assert!(pin_shadow_in_dynamic(Some("not toml [[[")).is_none());
+    }
+
     /// A non-string pin is still a pin (it forces the static manager); the
     /// detail names the fallback instead of a path.
     #[test]
     fn non_string_pin_is_still_a_pin() {
-        let c = mode_keyed_check(Some("model_catalog_json = 123\n"), Mode::Dynamic).unwrap();
+        let c = pin_shadow_in_dynamic(Some("model_catalog_json = 123\n")).unwrap();
         assert!(matches!(c.status, CheckStatus::Warn), "{c:?}");
         assert!(c.detail.contains("<not a string>"), "{c:?}");
     }
@@ -1064,12 +1314,15 @@ base_url = "http://127.0.0.1:9999/v1"
     /// Every environment input is injected: the test never reads the
     /// developer's real `~/.codex/config.toml` or doctor state file, and
     /// never spawns `codex`.
+    ///
+    /// Dynamic mode also smokes `/v1/models`, so the router config points at
+    /// a stub that answers — a dead endpoint would (correctly) FAIL, and the
+    /// old hardcoded default 8787 is dead on CI.
     #[test]
     fn quick_checks_report_all_common_checks_in_a_wired_dynamic_environment() {
         let dir = tempfile::tempdir().unwrap();
-        let config_path = write_config(dir.path());
-        // CONFIG has no `[server]` section, so the expected Codex-side
-        // base_url is the default bind address — DYNAMIC_CODEX_TOML matches.
+        let (base, port) = spawn_models_stub(200, &catalog_body(&["x/model-a"]));
+        let config_path = write_config_on_port(dir.path(), port);
         let state = DoctorState {
             last_green: Some("0.158.0".into()),
             last_run: None,
@@ -1077,18 +1330,20 @@ base_url = "http://127.0.0.1:9999/v1"
         let checks = offline_checks_with_env(
             &config_path,
             None,
-            Some(DYNAMIC_CODEX_TOML),
+            Some(&dynamic_codex_toml(&base)),
             Some("codex-cli 0.158.0".into()),
             &state,
         );
         assert!(!report_has_fail(&checks), "{checks:?}");
-        assert_eq!(checks.len(), 6, "{checks:?}");
+        assert_eq!(checks.len(), 8, "{checks:?}");
         for (name, want) in [
             ("config loads", CheckStatus::Pass),
             ("router has routes", CheckStatus::Pass),
             ("template fields dropped", CheckStatus::Info),
             ("detected mode", CheckStatus::Info),
             ("codex wiring", CheckStatus::Pass),
+            ("models endpoint reachable", CheckStatus::Pass),
+            ("models endpoint shape", CheckStatus::Pass),
             ("codex version status", CheckStatus::Pass),
         ] {
             let c = checks
@@ -1097,6 +1352,209 @@ base_url = "http://127.0.0.1:9999/v1"
                 .unwrap_or_else(|| panic!("check {name:?} missing from {checks:?}"));
             assert_eq!(c.status, want, "check {name:?} in {checks:?}");
         }
+    }
+
+    // ---- dynamic endpoint checks (spec L2.8'/L2.9') ----
+
+    /// A serialized `{"models": [...]}` body with one complete entry per
+    /// slug (a valid stub response for the endpoint checks; see
+    /// [`pin_entry`] for the presence-only field values).
+    fn catalog_body(slugs: &[&str]) -> String {
+        serde_json::to_string(&good_pin(slugs)).unwrap()
+    }
+
+    /// Reserve a free loopback port with nothing listening, for the
+    /// connect-failure tests.
+    fn free_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("bind for free port")
+            .local_addr()
+            .expect("local addr")
+            .port()
+    }
+
+    /// Spawn a stub axum server answering `GET /v1/models?client_version=doctor-l2`
+    /// (the exact fetch the endpoint checks make) on a fresh OS thread with
+    /// its own tokio current-thread runtime — the same thread+runtime pattern
+    /// the production checks use. Serves `(status, body)` for every request,
+    /// or 400 when the sample query is absent, so a wrong URL fails loudly.
+    /// Returns `(base_url, port)`; the thread lives until the test process
+    /// exits.
+    fn spawn_models_stub(status: u16, body: &str) -> (String, u16) {
+        let body = body.to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                let app = axum::Router::new().route(
+                    "/v1/models",
+                    axum::routing::get(
+                        move |axum::extract::Query(query): axum::extract::Query<
+                            std::collections::HashMap<String, String>,
+                        >| async move {
+                            if query.get("client_version").map(String::as_str)
+                                != Some("doctor-l2")
+                            {
+                                return (
+                                    axum::http::StatusCode::BAD_REQUEST,
+                                    "expected client_version=doctor-l2".to_string(),
+                                );
+                            }
+                            (
+                                axum::http::StatusCode::from_u16(status).unwrap(),
+                                body.clone(),
+                            )
+                        },
+                    ),
+                );
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .unwrap();
+                let addr = listener.local_addr().unwrap();
+                let _ = tx.send((
+                    format!("http://127.0.0.1:{}/v1", addr.port()),
+                    addr.port(),
+                ));
+                axum::serve(listener, app).await.unwrap();
+            });
+        });
+        rx.recv().unwrap()
+    }
+
+    #[test]
+    fn models_endpoint_reachable_passes_on_200() {
+        let (base, _) = spawn_models_stub(200, &catalog_body(&["x/a"]));
+        let c = models_endpoint_reachable(&base);
+        assert_eq!(c.name, "models endpoint reachable");
+        assert_eq!(c.status, CheckStatus::Pass, "{c:?}");
+        assert!(c.detail.contains("200"), "{c:?}");
+    }
+
+    #[test]
+    fn models_endpoint_reachable_fails_on_500() {
+        let (base, _) = spawn_models_stub(500, "unavailable");
+        let c = models_endpoint_reachable(&base);
+        assert_eq!(c.status, CheckStatus::Fail, "{c:?}");
+        assert!(c.detail.contains("500"), "{c:?}");
+        assert!(
+            c.detail.contains("CatalogCache::get"),
+            "FAIL must carry the remediation: {c:?}"
+        );
+    }
+
+    /// A dynamic-mode offline run against a dead endpoint MUST produce a
+    /// reachability FAIL (connect refusal surfaces as the error branch, not
+    /// a timeout hang).
+    #[test]
+    fn models_endpoint_reachable_fails_when_nothing_is_listening() {
+        let base = format!("http://127.0.0.1:{}/v1", free_port());
+        let c = models_endpoint_reachable(&base);
+        assert_eq!(c.status, CheckStatus::Fail, "{c:?}");
+    }
+
+    #[test]
+    fn models_endpoint_shape_passes_on_a_valid_catalog() {
+        let (base, _) = spawn_models_stub(200, &catalog_body(&["x/a", "x/b"]));
+        let c = models_endpoint_shape(&base);
+        assert_eq!(c.name, "models endpoint shape");
+        assert_eq!(c.status, CheckStatus::Pass, "{c:?}");
+        assert!(c.detail.contains("all 2 entries"), "{c:?}");
+    }
+
+    /// L2.9': a body missing any required field fails with that field named.
+    #[test]
+    fn models_endpoint_shape_fails_on_a_missing_required_field() {
+        let mut pin = good_pin(&["x/a"]);
+        pin["models"][0].as_object_mut().unwrap().remove("visibility");
+        let (base, _) = spawn_models_stub(200, &serde_json::to_string(&pin).unwrap());
+        let c = models_endpoint_shape(&base);
+        assert_eq!(c.status, CheckStatus::Fail, "{c:?}");
+        assert!(c.detail.contains("visibility"), "{c:?}");
+    }
+
+    #[test]
+    fn models_endpoint_shape_fails_when_body_is_not_catalog_json() {
+        for body in ["not json", r#"{"foo":"bar"}"#, r#"{"models":"nope"}"#] {
+            let (base, _) = spawn_models_stub(200, body);
+            let c = models_endpoint_shape(&base);
+            assert_eq!(c.status, CheckStatus::Fail, "body {body:?}: {c:?}");
+        }
+    }
+
+    #[test]
+    fn models_endpoint_shape_fails_when_the_endpoint_is_down() {
+        let base = format!("http://127.0.0.1:{}/v1", free_port());
+        let c = models_endpoint_shape(&base);
+        assert_eq!(c.status, CheckStatus::Fail, "{c:?}");
+    }
+
+    // ---- dynamic-mode composition (spec L2.7'-L2.9') ----
+
+    /// Composition through `offline_checks_with_mode`: a dynamic-mode config
+    /// whose `[server] port` is the stub's port, with a codex TOML carrying
+    /// BOTH a pin and `auth.command`, must emit the pin-shadow WARN and pass
+    /// both endpoint checks against the live stub.
+    #[test]
+    fn dynamic_mode_reports_pin_shadow_warn_and_passes_endpoints() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, port) = spawn_models_stub(200, &catalog_body(&["x/model-a"]));
+        let config_path = write_config_on_port(dir.path(), port);
+        let codex_toml = format!(
+            "model_catalog_json = \"/tmp/pinned.json\"\n{}",
+            dynamic_codex_toml(&base)
+        );
+        let checks = offline_checks_with_mode(
+            &config_path,
+            None,
+            Mode::Dynamic,
+            "codexferry",
+            Some(&codex_toml),
+            None,
+            &DoctorState::default(),
+        );
+        assert!(!report_has_fail(&checks), "{checks:?}");
+        let shadow = checks
+            .iter()
+            .find(|c| c.name == "pin shadows live fetch")
+            .unwrap_or_else(|| panic!("missing pin shadow warn in {checks:?}"));
+        assert!(matches!(shadow.status, CheckStatus::Warn), "{shadow:?}");
+        assert!(shadow.detail.contains("remove the pin"), "{shadow:?}");
+        for name in ["models endpoint reachable", "models endpoint shape"] {
+            let c = checks
+                .iter()
+                .find(|c| c.name == name)
+                .unwrap_or_else(|| panic!("missing {name:?} in {checks:?}"));
+            assert_eq!(c.status, CheckStatus::Pass, "check {name:?}: {c:?}");
+        }
+    }
+
+    /// Composition: a dynamic-mode offline run against a 500-ing endpoint
+    /// must FAIL the reachability check (and the run), as codex itself would
+    /// be unable to fetch the catalog.
+    #[test]
+    fn dynamic_mode_offline_run_fails_when_endpoint_returns_500() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, port) = spawn_models_stub(500, "boom");
+        let config_path = write_config_on_port(dir.path(), port);
+        let codex_toml = dynamic_codex_toml(&base);
+        let checks = offline_checks_with_mode(
+            &config_path,
+            None,
+            Mode::Dynamic,
+            "codexferry",
+            Some(&codex_toml),
+            None,
+            &DoctorState::default(),
+        );
+        let reachable = checks
+            .iter()
+            .find(|c| c.name == "models endpoint reachable")
+            .unwrap_or_else(|| panic!("missing reachable check in {checks:?}"));
+        assert_eq!(reachable.status, CheckStatus::Fail, "{reachable:?}");
+        assert!(report_has_fail(&checks), "{checks:?}");
     }
 
     // ---- pinned-mode checks (spec L2.7-L2.10) ----
