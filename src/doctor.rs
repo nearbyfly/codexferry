@@ -25,6 +25,14 @@
 //! degrades to L1 + L2 when it is not); `--live` runs the L3 probe only
 //! (unchanged user-visible behavior).
 //!
+//! Live-involving runs (`--live` and the composed default when codex is
+//! available) persist their outcome to the doctor state file before
+//! exiting (spec §L4): a green run records `last_run` and sets `last_green`
+//! from the normalized codex version, while a red run records `last_run`
+//! with `green = false` and preserves `last_green`. `--offline` never
+//! writes state. State write failures are best-effort warnings and never
+//! change the verdict or exit code.
+//!
 //! Exit codes: 0 all pass, 1 any FAIL, 2 environment unusable (codex not
 //! installed or runnable; raised inside [`crate::doctor_live::run`], in
 //! practice reachable via `--live` only). WARN is advisory and never fails
@@ -106,12 +114,14 @@ impl Check {
 ///   codex is available, else runs L1 + L2 only.
 ///
 /// `--live` wins over `--offline` (mode-aware doctor spec: `live = live ||
-/// (codex_available && !offline)`), and the availability spawn is skipped
-/// whenever either flag decides. Exit codes: 0 all pass, 1 any FAIL on
+/// (codex_available && !offline)`), and the `codex --version` spawn is
+/// skipped whenever either flag decides. Live-involving runs persist their
+/// outcome to the doctor state file before printing the report (spec §L4);
+/// `--offline` never writes state. Exit codes: 0 all pass, 1 any FAIL on
 /// every mode; 2 is raised only by [`crate::doctor_live::run`]'s
 /// environment gate (codex missing or unrunnable) — in practice reachable via
 /// `--live` only, since the default enters the live path only when
-/// `codex_available()` has just succeeded. The composed default is not
+/// `codex_version_output()` has just succeeded. The composed default is not
 /// unit-tested (it needs codex on PATH and free ports); it is covered by
 /// CLI verification.
 pub fn run_doctor(
@@ -122,14 +132,24 @@ pub fn run_doctor(
 ) -> anyhow::Result<()> {
     // Resolve the live path only when neither flag already decides:
     // `--live` forces it and `--offline` skips it, so both avoid a
-    // redundant `codex --version` availability spawn.
-    let available = if live || offline { false } else { codex_available() };
+    // redundant `codex --version` spawn. The captured output doubles as
+    // the persisted-state record on the composed default path.
+    let codex_version = if live || offline { None } else { codex_version_output() };
+    let available = codex_version.is_some();
     let run_live = live_requested(live, offline, available);
     if run_live && live {
         // `--live`: probe-only report (unchanged user-visible behavior —
         // the archived "prints + exits" contract is preserved by the
         // caller below).
         let checks = crate::doctor_live::run(config_path)?;
+        // `doctor_live::run`'s environment gate has just proven codex
+        // spawnable; re-read its version for the persisted state record.
+        let codex_version = codex_version_output();
+        let green = !report_has_fail(&checks);
+        let state = apply_record(green, codex_version.as_deref(), DoctorState::read());
+        if let Err(e) = state.write() {
+            eprintln!("warning: could not write doctor state: {e}");
+        }
         return finish_report(&checks);
     }
     if run_live && !live {
@@ -138,9 +158,16 @@ pub fn run_doctor(
         // offline + live)").
         let mut checks = offline_checks(config_path, codex_models);
         checks.extend(crate::doctor_live::run(config_path)?);
+        let green = !report_has_fail(&checks);
+        let state = apply_record(green, codex_version.as_deref(), DoctorState::read());
+        if let Err(e) = state.write() {
+            eprintln!("warning: could not write doctor state: {e}");
+        }
         return finish_report(&checks);
     }
     // `--offline` (or no codex on the default path): fast L1 + L2 check.
+    // Offline runs never persist state (spec §L4: `--offline` never marks
+    // a version verified).
     finish_report(&offline_checks(config_path, codex_models))
 }
 
@@ -155,17 +182,19 @@ fn finish_report(checks: &[Check]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Whether the Codex CLI is installed and runnable: `codex --version`
-/// succeeds. This is the same environment gate `doctor_live::run` applies
-/// before probing; here it makes the composed default run the live probe
-/// whenever codex is present. Only invoked when neither `--live` nor
-/// `--offline` is set (see [`run_doctor`]), so the explicit modes never
-/// pay for this spawn.
-fn codex_available() -> bool {
+/// Run `codex --version` and return its trimmed stdout when the spawn
+/// succeeds; `None` when codex is missing or exits non-zero. This is the
+/// same environment gate `doctor_live::run` applies before probing.
+/// [`run_doctor`] invokes it ONCE on the offline/default decision path (the
+/// captured output doubles as the persisted-state record) and the explicit
+/// `--live` branch invokes it once after the probe for the same record.
+fn codex_version_output() -> Option<String> {
     std::process::Command::new("codex")
         .arg("--version")
         .output()
-        .is_ok_and(|out| out.status.success())
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 /// Whether the live probes should run: `--live` always forces them, while
@@ -174,6 +203,36 @@ fn codex_available() -> bool {
 /// `live = live || (codex_available && !offline)`).
 fn live_requested(live: bool, offline: bool, codex_available: bool) -> bool {
     live || (codex_available && !offline)
+}
+
+/// Spec §L4 state rule: apply the outcome of a live-involving run to a
+/// copy of the persisted state. Green sets `last_green` (only when the
+/// codex version normalizes) and records `last_run`; red records `last_run`
+/// while preserving `last_green`. Never changes a verdict.
+pub(crate) fn apply_record(
+    green: bool,
+    codex_version_output: Option<&str>,
+    mut state: crate::version::DoctorState,
+) -> crate::version::DoctorState {
+    state.last_run = Some(crate::version::LastRun {
+        green,
+        codex_version: codex_version_output.map(str::to_string),
+        at_unix: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        summary: if green {
+            "all checks passed".to_string()
+        } else {
+            "some checks failed".to_string()
+        },
+    });
+    if green {
+        if let Some(v) = codex_version_output.and_then(crate::version::normalize_version) {
+            state.last_green = Some(v);
+        }
+    }
+    state
 }
 
 /// Default Codex config location: `$HOME/.codex/config.toml`.
@@ -277,9 +336,9 @@ pub(crate) fn offline_checks_with_env(
 ///    forces `StaticModelsManager`, so the live fetch `auth.command` would
 ///    enable never runs. Called from BOTH the Pinned and Dynamic branches
 ///    (never Fallback: no pin), so a mixed config warns no matter how
-///    `detect_mode` classified it — a string pin makes `detect_mode` say
-///    Pinned, which must not hide the shadow. Emitted exactly once; always
-///    WARN, never FAIL.
+///    `detect_mode` classified it — any present pin (string or non-string)
+///    makes `detect_mode` say Pinned, which must not hide the shadow.
+///    Emitted exactly once; always WARN, never FAIL.
 /// 8. pinned-mode checks (spec L2.7–L2.10, only when `mode` is
 ///    [`Mode::Pinned`]): pin exists + parses, pin ⊇ router routes,
 ///    pin ⊆ router routes, and pin entry field shape.
@@ -376,9 +435,10 @@ pub(crate) fn offline_checks_with_mode(
     }
     // L2.7': the pin-shadow WARN fires whenever BOTH `model_catalog_json`
     // and a provider `[X.auth].command` coexist, regardless of the detected
-    // mode — a string pin makes `detect_mode` say Pinned, but the
-    // `auth.command` still exists and the live fetch still never runs under
-    // the pin. Each branch below calls [`pin_shadow_warn`] exactly once.
+    // mode — any present pin (string or non-string) makes `detect_mode` say
+    // Pinned, but the `auth.command` still exists and the live fetch still
+    // never runs under the pin. Each branch below calls [`pin_shadow_warn`]
+    // exactly once.
     // Pinned-mode checks (spec L2.7–L2.10): the pin is codex's only catalog
     // source in static mode, so doctor validates the file offline before
     // codex hard-errors on it at session start.
@@ -570,12 +630,12 @@ fn parse_codex_toml(codex_toml: Option<&str>) -> Option<toml::Value> {
 /// wiring still works, the user just gets stale pinned metadata), advising
 /// "remove the pin OR remove `auth.command` — pick one mode".
 ///
-/// Mode-neutral by design: `detect_mode` classifies a string pin as
-/// [`Mode::Pinned`], so a mixed config would never reach a Dynamic-only
-/// shadow check. [`offline_checks_with_mode`] therefore calls this from BOTH
-/// the Pinned and Dynamic branches (exactly once per run). Absent or
-/// unparseable `codex_toml`, no pin, or no provider `auth.command` emits
-/// nothing.
+/// Mode-neutral by design: `detect_mode` classifies any present pin (string
+/// or non-string) as [`Mode::Pinned`], so a mixed config would never reach
+/// a Dynamic-only shadow check. [`offline_checks_with_mode`] therefore
+/// calls this from BOTH the Pinned and Dynamic branches (exactly once per
+/// run). Absent or unparseable `codex_toml`, no pin, or no provider
+/// `auth.command` emits nothing.
 pub(crate) fn pin_shadow_warn(codex_toml: Option<&str>) -> Option<Check> {
     let val = parse_codex_toml(codex_toml)?;
     let pin = val.get("model_catalog_json")?;
@@ -651,8 +711,9 @@ fn resolve_pin_path(raw: &str) -> PathBuf {
 /// already holds, reads the file, and parses it with [`pin_file_check`].
 /// Every failure is folded into a `String` detail the wiring reports as the
 /// single "pin unreadable" check, so the wiring stays one match arm. A
-/// missing/non-string pin key is defensive here (`detect_mode` only
-/// classifies string pins as Pinned) but still fails the check.
+/// missing pin key is defensive here (a direct pinned-mode caller can lack
+/// the key); a non-string pin is a real pin (`detect_mode` classifies any
+/// present `model_catalog_json` as Pinned) and still fails the check.
 fn read_pin(codex_toml: Option<&str>) -> Result<(PathBuf, Value), String> {
     let raw = codex_toml
         .and_then(|text| text.parse::<toml::Value>().ok())
@@ -1185,6 +1246,101 @@ args = ["dummy"]
     #[test]
     fn live_requested_default_skips_live_without_codex() {
         assert!(!live_requested(false, false, false));
+    }
+
+    // ---- apply_record (spec §L4 state rule) ----
+
+    /// Seconds since the Unix epoch, for bounding `apply_record`'s clock
+    /// reads in tests without depending on exact timing.
+    fn epoch_now() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
+
+    /// Green + parseable version: `last_green` is set to the NORMALIZED
+    /// version and `last_run` records the green run.
+    #[test]
+    fn apply_record_green_with_parseable_version_sets_last_green_and_records_run() {
+        let before = epoch_now();
+        let state = apply_record(true, Some("codex-cli 0.147.0"), DoctorState::default());
+        let after = epoch_now();
+        assert_eq!(state.last_green.as_deref(), Some("0.147.0"));
+        let run = state.last_run.expect("green run must record last_run");
+        assert!(run.green);
+        assert_eq!(run.codex_version.as_deref(), Some("codex-cli 0.147.0"));
+        assert!(
+            (before..=after).contains(&run.at_unix),
+            "at_unix {at} not in [{before}, {after}]",
+            at = run.at_unix
+        );
+        assert!(run.summary.contains("passed"), "summary: {}", run.summary);
+    }
+
+    /// Green + unparseable (or missing) version: the verdict records green
+    /// but `last_green` is PRESERVED from the input state — an unparseable
+    /// version must never establish a verified version.
+    #[test]
+    fn apply_record_green_with_unparseable_or_missing_version_preserves_last_green() {
+        let before = epoch_now();
+        let mut stamps = Vec::new();
+        for raw in [Some("no digits"), None] {
+            let prior = DoctorState {
+                last_green: Some("0.158.0".into()),
+                last_run: None,
+            };
+            let state = apply_record(true, raw, prior);
+            assert_eq!(
+                state.last_green.as_deref(),
+                Some("0.158.0"),
+                "last_green must survive a green run with unparseable version"
+            );
+            let run = state.last_run.expect("green run must record last_run");
+            assert!(run.green);
+            stamps.push(run.at_unix);
+        }
+        let after = epoch_now();
+        assert!(
+            stamps.iter().all(|&at| (before..=after).contains(&at)),
+            "stamps {stamps:?} outside [{before}, {after}]"
+        );
+    }
+
+    /// Red: `last_run` records green=false while `last_green` is PRESERVED
+    /// — the daemon's unverified warning persists until the next green run.
+    #[test]
+    fn apply_record_red_records_run_and_preserves_last_green() {
+        let before = epoch_now();
+        let prior = DoctorState {
+            last_green: Some("0.158.0".into()),
+            last_run: Some(crate::version::LastRun {
+                green: true,
+                codex_version: Some("codex-cli 0.158.0".into()),
+                at_unix: 1,
+                summary: "all checks passed".into(),
+            }),
+        };
+        let state = apply_record(false, Some("codex-cli 0.160.0"), prior);
+        let after = epoch_now();
+        assert_eq!(state.last_green.as_deref(), Some("0.158.0"));
+        let run = state.last_run.expect("red run must record last_run");
+        assert!(!run.green);
+        assert_eq!(run.codex_version.as_deref(), Some("codex-cli 0.160.0"));
+        assert!((before..=after).contains(&run.at_unix));
+        assert!(run.summary.contains("failed"), "summary: {}", run.summary);
+    }
+
+    /// Defaults (empty state): a red run with no version output records the
+    /// red run and leaves `last_green` at its default `None`.
+    #[test]
+    fn apply_record_handles_default_empty_state() {
+        let state = apply_record(false, None, DoctorState::default());
+        assert_eq!(state.last_green, None);
+        let run = state.last_run.expect("red run must record last_run");
+        assert!(!run.green);
+        assert_eq!(run.codex_version, None);
+        assert!(run.at_unix > 0);
     }
 
     // The composed default (L1 + L2 then L3 in one report) is exercised by
@@ -2307,10 +2463,11 @@ base_url = "http://127.0.0.1:9999/v1"
         assert!(report_has_fail(&checks), "{checks:?}");
     }
 
-    /// Defensive L2.7 branch: `detect_mode` never classifies a missing or
-    /// non-string `model_catalog_json` as Pinned, but a direct pinned-mode
-    /// caller must still be told the pin is unreadable rather than silently
-    /// skipping the pinned checks.
+    /// Defensive L2.7 branch: `detect_mode` classifies ANY present
+    /// `model_catalog_json` (string or non-string) as Pinned, but this test
+    /// still drives the pinned path directly — including a missing key — so
+    /// the L2.7 pin-unreadable FAIL stays reachable no matter how mode
+    /// detection changes.
     #[test]
     fn pinned_mode_without_a_string_pin_key_fails_pin_unreadable() {
         let dir = tempfile::tempdir().unwrap();

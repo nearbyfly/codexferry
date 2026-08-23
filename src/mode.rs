@@ -6,8 +6,10 @@ use toml::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
-    /// `model_catalog_json` set: codex reads the pinned file
-    /// (`StaticModelsManager`), `/v1/models` is never consulted.
+    /// `model_catalog_json` present (any value): codex selects the pinned
+    /// catalog path (`StaticModelsManager`), `/v1/models` is never
+    /// consulted. A non-string pin still classifies as Pinned so doctor's
+    /// L2.7 `read_pin` surfaces the malformed key instead of falling back.
     Pinned,
     /// No pin, provider has `[X.auth] command`: codex fetches `/v1/models`
     /// each session start (`OpenAiModelsManager`, `has_command_auth` gate).
@@ -24,9 +26,12 @@ pub const DEFAULT_ACTIVE_PROVIDER: &str = "codexferry";
 ///
 /// The caller resolves and passes the active provider (default
 /// `DEFAULT_ACTIVE_PROVIDER`). `None` text or a TOML parse failure degrades
-/// to `Fallback`; a top-level string `model_catalog_json` takes priority and
-/// yields `Pinned`; otherwise a string `[model_providers.{active}].auth.command`
-/// yields `Dynamic`; anything else is `Fallback`.
+/// to `Fallback`; a top-level `model_catalog_json` PRESENT (any value — a
+/// TOML table/array/number counts) takes priority and yields `Pinned`,
+/// because a non-string pin is still a pin and must surface as doctor's
+/// L2.7 "pin unreadable" FAIL rather than a silent fallback; otherwise a
+/// string `[model_providers.{active}].auth.command` yields `Dynamic`;
+/// anything else is `Fallback`.
 pub fn detect_mode(codex_toml_text: Option<&str>, active_provider: &str) -> Mode {
     let Some(text) = codex_toml_text else {
         return Mode::Fallback;
@@ -34,11 +39,7 @@ pub fn detect_mode(codex_toml_text: Option<&str>, active_provider: &str) -> Mode
     let Ok(val) = text.parse::<Value>() else {
         return Mode::Fallback;
     };
-    if val
-        .get("model_catalog_json")
-        .and_then(Value::as_str)
-        .is_some()
-    {
+    if val.get("model_catalog_json").is_some() {
         return Mode::Pinned;
     }
     let provider = val
@@ -79,6 +80,47 @@ mod tests {
         assert_eq!(
             detect_mode(Some(toml), DEFAULT_ACTIVE_PROVIDER),
             Mode::Pinned
+        );
+    }
+
+    /// A non-string pin is still a pin (spec §Mode detection: any present
+    /// `model_catalog_json` → Pinned): codex's static manager would still be
+    /// selected, so doctor must surface the malformed key via its L2.7
+    /// "pin unreadable" FAIL instead of silently reporting fallback wiring.
+    #[test]
+    fn non_string_pin_classifies_pinned_and_auth_only_stays_dynamic() {
+        let toml = r#"
+            model = "x/y"
+            model_provider = "codexferry"
+            model_catalog_json = 123
+
+            [model_providers.codexferry]
+            base_url = "http://127.0.0.1:8787/v1"
+            wire_api = "responses"
+            [model_providers.codexferry.auth]
+            command = "echo"
+            args = ["dummy"]
+        "#;
+        assert_eq!(
+            detect_mode(Some(toml), DEFAULT_ACTIVE_PROVIDER),
+            Mode::Pinned
+        );
+
+        // Regression: auth-only (no pin) must stay Dynamic under the same
+        // presence check — the numeric pin must not drag it into Pinned or
+        // Fallback.
+        let auth_only = r#"
+            model = "x/y"
+            [model_providers.codexferry]
+            base_url = "http://127.0.0.1:8787/v1"
+            wire_api = "responses"
+            [model_providers.codexferry.auth]
+            command = "echo"
+            args = ["dummy"]
+        "#;
+        assert_eq!(
+            detect_mode(Some(auth_only), DEFAULT_ACTIVE_PROVIDER),
+            Mode::Dynamic
         );
     }
 
