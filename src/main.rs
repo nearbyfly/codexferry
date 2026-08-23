@@ -13,10 +13,12 @@
 //!   Codex `model_catalog_json` file (see [`catalog::run_gen_catalog`]) so
 //!   the Codex TUI knows about the proxy's `provider/alias` models.
 //! * **`doctor` subcommand** — contract health check (upgrade tripwire):
-//!   offline it runs the mode-aware quick-checks (config loads, router
+//!   the mode-aware quick-checks (config loads, router
 //!   routes, template dropped-field tripwire, mode classification, Codex
-//!   wiring, version status — see [`doctor::run_doctor`]); `--live`
-//!   additionally drives the installed Codex CLI through a temporary router.
+//!   wiring, version status — see [`doctor::run_doctor`]) always run; by
+//!   default the live probe through a temporary router also runs whenever
+//!   the Codex CLI is available, `--offline` skips it (fast L1 + L2 check)
+//!   and `--live` forces it.
 //!
 //! Logging is initialized lazily inside [`proxy::run`] (see `logging.rs`).
 //! The `gen-catalog` path also installs a tracing subscriber — Once-guarded
@@ -101,11 +103,12 @@ enum Commands {
 
     /// Check router ↔ Codex contract health (upgrade tripwire).
     ///
-    /// Offline mode (default) runs the mode-aware quick-checks (config
-    /// loads, router routes, mode classification, Codex wiring, version
-    /// status). `--live` additionally drives the installed Codex CLI
-    /// through a temporary in-process router + mock upstream and asserts
-    /// the normalized wire shape and a full tool round-trip.
+    /// Runs the mode-aware quick-checks (config loads, router routes, mode
+    /// classification, Codex wiring, version status). By default the live
+    /// wire-shape + tool round-trip probe also runs whenever the Codex CLI
+    /// is available; `--offline` skips it (L1 + L2 only, fast checks
+    /// without codex) and `--live` forces it (reporting an environment
+    /// failure with exit 2 when codex is missing or unrunnable).
     Doctor {
         /// Path to the router TOML config (defaults to CODEXFERRY_CONFIG
         /// or ./cxf.toml, same rule as the server).
@@ -125,6 +128,9 @@ enum Commands {
         /// Run the live wire-shape + tool round-trip probe.
         #[arg(long)]
         live: bool,
+        /// Skip live probes (L1 + L2 only). Useful for fast checks without codex.
+        #[arg(long)]
+        offline: bool,
     },
 }
 
@@ -133,8 +139,9 @@ enum Commands {
 /// Parses the CLI arguments and dispatches:
 /// * `Some(Commands::GenCatalog { .. })` → offline catalog generation
 ///   (`catalog::run_gen_catalog`), then exit.
-/// * `Some(Commands::Doctor { .. })` → offline/live contract health check
-///   (`doctor::run_doctor`), then exit (exit code 1 on any FAIL).
+/// * `Some(Commands::Doctor { .. })` → contract health check
+///   (`doctor::run_doctor`), then exit (exit code 1 on any FAIL; exit 2
+///   only via the live path's environment gate).
 /// * `None` → the long-running proxy server (`proxy::run`), which blocks
 ///   until a shutdown signal (SIGINT/SIGTERM) is received.
 ///
@@ -157,9 +164,10 @@ async fn main() -> anyhow::Result<()> {
             catalog: _,
             codex_models,
             live,
+            offline,
         }) => {
             let config_path = config.unwrap_or_else(crate::config::default_config_path);
-            doctor::run_doctor(&config_path, codex_models.as_deref(), live)?;
+            doctor::run_doctor(&config_path, codex_models.as_deref(), live, offline)?;
         }
         None => {
             // Server mode: init logging, load config, spawn watcher, serve.

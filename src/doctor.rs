@@ -95,17 +95,26 @@ impl Check {
 
 /// Entry point from `main`. Prints the report; exits 1 on any FAIL (2 is
 /// reserved for environment failures, used by the live path).
+///
+/// The live probes run when `live` is set OR when codex is available and
+/// `offline` is not set: on a machine with codex installed the default is
+/// L1 + L2 + L3, while `--offline` gives a fast L1 + L2 check. `--live`
+/// wins over `--offline` (mode-aware doctor spec: `live = live ||
+/// (codex_available && !offline)`). Exit codes: 0 all pass, 1 any FAIL on
+/// either path; 2 is raised only by the live path's environment gate
+/// (codex missing or unrunnable) — the offline path never exits 2.
 pub fn run_doctor(
     config_path: &Path,
     codex_models: Option<&Path>,
     live: bool,
+    offline: bool,
 ) -> anyhow::Result<()> {
-    // Live mode: in-process mock upstream + temporary router driving the
+    // Live path: in-process mock upstream + temporary router driving the
     // real Codex CLI (see `doctor_live`). `doctor_live::run` prints the
     // report and raises exit 1 (FAIL) / 2 (environment) itself, preserving
     // the archived "prints + exits" live behavior without a second report
     // here. The offline quick-checks below are skipped entirely.
-    if live {
+    if live_requested(live, offline, codex_available()) {
         return crate::doctor_live::run(config_path);
     }
     let checks = offline_checks(config_path, codex_models);
@@ -114,6 +123,25 @@ pub fn run_doctor(
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// Whether the Codex CLI is installed and runnable: `codex --version`
+/// succeeds. This is the same environment gate `doctor_live::run` applies
+/// before probing; here it makes the live probes the default whenever
+/// codex is present.
+fn codex_available() -> bool {
+    std::process::Command::new("codex")
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success())
+}
+
+/// Whether the live probes should run: `--live` always forces them, while
+/// the default runs them only when codex is available AND `--offline` was
+/// not given. `--live` wins over `--offline` (mode-aware doctor spec:
+/// `live = live || (codex_available && !offline)`).
+fn live_requested(live: bool, offline: bool, codex_available: bool) -> bool {
+    live || (codex_available && !offline)
 }
 
 /// Default Codex config location: `$HOME/.codex/config.toml`.
@@ -1092,6 +1120,36 @@ args = ["dummy"]
     /// `~/.codex/config.toml` or state file, and never spawn codex.
     fn no_env() -> (Option<&'static str>, Option<String>, DoctorState) {
         (None, None, DoctorState::default())
+    }
+
+    /// `--live` always forces the live probes, even when `--offline` is set
+    /// or codex is not available.
+    #[test]
+    fn live_requested_live_flag_forces_live_even_when_offline_or_codex_missing() {
+        assert!(live_requested(true, true, false));
+        assert!(live_requested(true, true, true));
+        assert!(live_requested(true, false, false));
+    }
+
+    /// Without `--live`, `--offline` skips the live probes regardless of
+    /// whether codex is available.
+    #[test]
+    fn live_requested_offline_skips_live_without_live_flag() {
+        assert!(!live_requested(false, true, true));
+        assert!(!live_requested(false, true, false));
+    }
+
+    /// The default (no flags) runs the live probes on a machine with codex
+    /// available.
+    #[test]
+    fn live_requested_default_runs_live_when_codex_is_available() {
+        assert!(live_requested(false, false, true));
+    }
+
+    /// Without codex the default degrades to the offline L1 + L2 checks.
+    #[test]
+    fn live_requested_default_skips_live_without_codex() {
+        assert!(!live_requested(false, false, false));
     }
 
     #[test]
