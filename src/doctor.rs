@@ -1,33 +1,35 @@
 //! `doctor` subcommand: codex-upgrade tripwire for the codexferry ↔ Codex
 //! contract.
 //!
-//! The default (non-`--live`) path runs the offline quick-checks from the
-//! 2026-08-23 mode-aware design spec (`docs/superpowers/specs/
-//! 2026-08-23-mode-aware-doctor-design.md` §Check layers L1/L2): config
-//! loads (L1.1), router has routes (L1.2), template dropped-field tripwire,
-//! mode classification (L1.4), Codex-side wiring hints (L1.3), the
-//! mode-keyed pin/shadow check — the replacement for the old single
-//! `shadow_check` (spec §Mode-specific shadow_check replacement +
-//! L2.7'': static-pin INFO / fallback-wiring WARN), the pin-shadow WARN
+//! The offline quick-checks from the 2026-08-23 mode-aware design spec
+//! (`docs/superpowers/specs/2026-08-23-mode-aware-doctor-design.md` §Check
+//! layers L1/L2): config loads (L1.1), router has routes (L1.2), template
+//! dropped-field tripwire, mode classification (L1.4), Codex-side wiring
+//! hints (L1.3), the mode-keyed pin/shadow check — the replacement for the
+//! old single `shadow_check` (spec §Mode-specific shadow_check replacement
+//! + L2.7'': static-pin INFO / fallback-wiring WARN), the pin-shadow WARN
 //! (spec L2.7': fires whenever BOTH `model_catalog_json` and a provider
-//! `[X.auth].command` coexist, so a mixed pinned/dynamic config is caught no
-//! matter which mode `detect_mode` reports), the pinned-mode checks (spec
-//! L2.7–L2.10: pin exists + parses, pin ⊇ router routes, pin ⊆ router routes,
-//! pin entry field shape), the dynamic-mode endpoint checks (spec
+//! `[X.auth].command` coexist, so a mixed pinned/dynamic config is caught
+//! no matter which mode `detect_mode` reports), the pinned-mode checks
+//! (spec L2.7–L2.10: pin exists + parses, pin ⊇ router routes, pin ⊆ router
+//! routes, pin entry field shape), the dynamic-mode endpoint checks (spec
 //! L2.8'–L2.9': `/v1/models` smoke + catalog shape), version age (L2.6) and
-//! version status vs the persisted doctor state. Every environment-dependent
-//! input is best-effort:
-//! no `~/.codex/config.toml` or no codex on PATH degrades to INFO/WARN. The
-//! one exception is L2.7: in pinned mode an unreadable pin FAILs, because
-//! codex cannot start until it is regenerated.
+//! version status vs the persisted doctor state. Every environment-
+//! dependent input is best-effort: no `~/.codex/config.toml` or no codex on
+//! PATH degrades to INFO/WARN. The one exception is L2.7: in pinned mode an
+//! unreadable pin FAILs, because codex cannot start until it is regenerated.
 //!
-//! `--live` runs the real-codex wire-shape + tool round-trip probe instead
-//! (see [`crate::doctor_live`]).
+//! The three run modes: `--offline` runs L1 + L2 only (fast path); the
+//! default composes L1 + L2 with the L3 live probe from
+//! [`crate::doctor_live`] into ONE report when codex is available (and
+//! degrades to L1 + L2 when it is not); `--live` runs the L3 probe only
+//! (unchanged user-visible behavior).
 //!
 //! Exit codes: 0 all pass, 1 any FAIL, 2 environment unusable (codex not
-//! installed or runnable, live path only). WARN is advisory and never
-//! fails the run (spec L2.7'/L2.7''). Infrastructure errors (router bind
-//! failure, healthz timeout, probe panic) propagate.
+//! installed or runnable; raised inside [`crate::doctor_live::run`], in
+//! practice reachable via `--live` only). WARN is advisory and never fails
+//! the run (spec L2.7'/L2.7''). Infrastructure errors (router bind failure,
+//! healthz timeout, probe panic) propagate.
 
 use crate::catalog;
 use crate::mode::Mode;
@@ -93,31 +95,59 @@ impl Check {
     }
 }
 
-/// Entry point from `main`. Prints the report; exits 1 on any FAIL (2 is
-/// reserved for environment failures, used by the live path).
+/// Entry point from `main`. Prints one report and exits 1 on any FAIL (2
+/// is reserved for the live path's environment gate).
 ///
-/// The live probes run when `live` is set OR when codex is available and
-/// `offline` is not set: on a machine with codex installed the default is
-/// L1 + L2 + L3, while `--offline` gives a fast L1 + L2 check. `--live`
-/// wins over `--offline` (mode-aware doctor spec: `live = live ||
-/// (codex_available && !offline)`). Exit codes: 0 all pass, 1 any FAIL on
-/// either path; 2 is raised only by the live path's environment gate
-/// (codex missing or unrunnable) — the offline path never exits 2.
+/// Modes:
+/// - `--live`: runs the L3 probe only ([`crate::doctor_live`]) — probe
+///   checks + progress lines, no quick checks.
+/// - `--offline`: runs the L1 + L2 quick checks only (fast path).
+/// - default (neither flag): composes L1 + L2 then L3 into one report when
+///   codex is available, else runs L1 + L2 only.
+///
+/// `--live` wins over `--offline` (mode-aware doctor spec: `live = live ||
+/// (codex_available && !offline)`), and the availability spawn is skipped
+/// whenever either flag decides. Exit codes: 0 all pass, 1 any FAIL on
+/// every mode; 2 is raised only by [`crate::doctor_live::run`]'s
+/// environment gate (codex missing or unrunnable) — in practice reachable via
+/// `--live` only, since the default enters the live path only when
+/// `codex_available()` has just succeeded. The composed default is not
+/// unit-tested (it needs codex on PATH and free ports); it is covered by
+/// CLI verification.
 pub fn run_doctor(
     config_path: &Path,
     codex_models: Option<&Path>,
     live: bool,
     offline: bool,
 ) -> anyhow::Result<()> {
-    // Live path: in-process mock upstream + temporary router driving the
-    // real Codex CLI (see `doctor_live`). `doctor_live::run` prints the
-    // report and raises exit 1 (FAIL) / 2 (environment) itself, preserving
-    // the archived "prints + exits" live behavior without a second report
-    // here. The offline quick-checks below are skipped entirely.
-    if live_requested(live, offline, codex_available()) {
-        return crate::doctor_live::run(config_path);
+    // Resolve the live path only when neither flag already decides:
+    // `--live` forces it and `--offline` skips it, so both avoid a
+    // redundant `codex --version` availability spawn.
+    let available = if live || offline { false } else { codex_available() };
+    let run_live = live_requested(live, offline, available);
+    if run_live && live {
+        // `--live`: probe-only report (unchanged user-visible behavior —
+        // the archived "prints + exits" contract is preserved by the
+        // caller below).
+        let checks = crate::doctor_live::run(config_path)?;
+        return finish_report(&checks);
     }
-    let checks = offline_checks(config_path, codex_models);
+    if run_live && !live {
+        // Default: ONE composed report — L1 + L2 quick checks first, then
+        // the L3 live probe (spec verification matrix: "doctor (default =
+        // offline + live)").
+        let mut checks = offline_checks(config_path, codex_models);
+        checks.extend(crate::doctor_live::run(config_path)?);
+        return finish_report(&checks);
+    }
+    // `--offline` (or no codex on the default path): fast L1 + L2 check.
+    finish_report(&offline_checks(config_path, codex_models))
+}
+
+/// Print a complete report and translate any FAIL into exit 1 (0
+/// otherwise). Shared by all three doctor modes so the print-and-exit
+/// decision stays in one place.
+fn finish_report(checks: &[Check]) -> anyhow::Result<()> {
     print_report(&checks);
     if report_has_fail(&checks) {
         std::process::exit(1);
@@ -127,8 +157,10 @@ pub fn run_doctor(
 
 /// Whether the Codex CLI is installed and runnable: `codex --version`
 /// succeeds. This is the same environment gate `doctor_live::run` applies
-/// before probing; here it makes the live probes the default whenever
-/// codex is present.
+/// before probing; here it makes the composed default run the live probe
+/// whenever codex is present. Only invoked when neither `--live` nor
+/// `--offline` is set (see [`run_doctor`]), so the explicit modes never
+/// pay for this spawn.
 fn codex_available() -> bool {
     std::process::Command::new("codex")
         .arg("--version")
@@ -166,7 +198,10 @@ pub fn offline_checks(config_path: &Path, codex_models: Option<&Path>) -> Vec<Ch
     // Codex-side wiring, mode and version status are best-effort: every
     // read here is allowed to fail into `None`.
     let codex_toml = std::fs::read_to_string(default_codex_config_path()).ok();
-    // Spawning codex happens ONLY here, on the production path.
+    // The availability gate in `run_doctor` spawns `codex` separately; this
+    // spawn is the quick-checks' own version probe (L2.6 + version status).
+    // The two are independent: the gate decides which path runs, these
+    // checks decide the version lines.
     let codex_version = std::process::Command::new("codex")
         .arg("--version")
         .output()
@@ -1151,6 +1186,11 @@ args = ["dummy"]
     fn live_requested_default_skips_live_without_codex() {
         assert!(!live_requested(false, false, false));
     }
+
+    // The composed default (L1 + L2 then L3 in one report) is exercised by
+    // CLI verification instead of a unit test: it needs codex on PATH and
+    // free ports, so injecting it would only test trivial branch wiring.
+    // `--offline` and `--live` cover the other two modes end-to-end.
 
     #[test]
     fn quick_checks_never_fail_on_a_good_dynamic_config() {

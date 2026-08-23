@@ -24,8 +24,14 @@
 //! degraded metadata path. The live-fetch assertion is the codex-side
 //! equivalent of the spec's router-log line: `models_cache.json` appears
 //! in codex's CODEX_HOME only after a successful `/v1/models` fetch.
+//!
+//! `run()` collects the probe checks and RETURNS them — it does not print
+//! the report or decide the exit code. `doctor::run_doctor` prints the
+//! (standalone or combined) report and exits 1 on any FAIL. The
+//! codex-missing environment gate is the one exception: it prints the
+//! environment line and exits 2 here, preserving the `--live` contract.
 
-use crate::doctor::{print_report, report_has_fail, Check};
+use crate::doctor::Check;
 use crate::mode::{self, Mode};
 use axum::routing::post;
 use axum::Router;
@@ -37,7 +43,9 @@ use std::sync::{Arc, Mutex};
 // source of truth (shared with the request-side visibility warns).
 use crate::normalize::KNOWN_INPUT_ITEM_TYPES;
 
-/// Live-probe entry point: runs both routes, prints the report, exits 1/2.
+/// Live-probe entry point: runs both routes and returns the collected
+/// checks. The caller ([`crate::doctor::run_doctor`]) prints the report
+/// and decides the exit code (0 all pass / 1 any FAIL).
 ///
 /// Detects the user's wiring mode from `~/.codex/config.toml` (spec
 /// 2026-08-23 §Mode detection) and threads it into the probe so the probe
@@ -48,7 +56,11 @@ use crate::normalize::KNOWN_INPUT_ITEM_TYPES;
 /// probe itself (it generates its own temp router config), but the probe
 /// wiring now depends on the real `~/.codex/config.toml` via the detected
 /// mode.
-pub fn run(_config_path: &Path) -> anyhow::Result<()> {
+///
+/// Environment gate: when codex is missing or unrunnable this function
+/// prints the environment line and exits 2 itself — the only exit it owns
+/// (the `--live` env-gate contract).
+pub fn run(_config_path: &Path) -> anyhow::Result<Vec<Check>> {
     // TODO(spec §3.2 item 6): on failure print last 20 lines of router log.
     // The in-process router installs no tracing subscriber → no router logs.
     //
@@ -86,11 +98,7 @@ pub fn run(_config_path: &Path) -> anyhow::Result<()> {
         Ok(Err(e)) => return Err(e),
         Err(_) => anyhow::bail!("doctor --live probe thread panicked"),
     };
-    print_report(&checks);
-    if report_has_fail(&checks) {
-        std::process::exit(1);
-    }
-    Ok(())
+    Ok(checks)
 }
 
 /// Resolve the active provider and wiring mode from raw codex config text

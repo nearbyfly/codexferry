@@ -13,12 +13,11 @@
 //!   Codex `model_catalog_json` file (see [`catalog::run_gen_catalog`]) so
 //!   the Codex TUI knows about the proxy's `provider/alias` models.
 //! * **`doctor` subcommand** — contract health check (upgrade tripwire):
-//!   the mode-aware quick-checks (config loads, router
+//!   the default composes the L1 + L2 quick checks (config loads, router
 //!   routes, template dropped-field tripwire, mode classification, Codex
-//!   wiring, version status — see [`doctor::run_doctor`]) always run; by
-//!   default the live probe through a temporary router also runs whenever
-//!   the Codex CLI is available, `--offline` skips it (fast L1 + L2 check)
-//!   and `--live` forces it.
+//!   wiring, version status) with the L3 live probe into ONE report whenever
+//!   the Codex CLI is available; `--offline` runs L1 + L2 only (fast path)
+//!   and `--live` runs the L3 probe only (see [`doctor::run_doctor`]).
 //!
 //! Logging is initialized lazily inside [`proxy::run`] (see `logging.rs`).
 //! The `gen-catalog` path also installs a tracing subscriber — Once-guarded
@@ -103,12 +102,10 @@ enum Commands {
 
     /// Check router ↔ Codex contract health (upgrade tripwire).
     ///
-    /// Runs the mode-aware quick-checks (config loads, router routes, mode
-    /// classification, Codex wiring, version status). By default the live
-    /// wire-shape + tool round-trip probe also runs whenever the Codex CLI
-    /// is available; `--offline` skips it (L1 + L2 only, fast checks
-    /// without codex) and `--live` forces it (reporting an environment
-    /// failure with exit 2 when codex is missing or unrunnable).
+    /// Default: L1 + L2 quick checks followed by the L3 live probe, printed
+    /// as one combined report. `--offline`: L1 + L2 only (fast checks
+    /// without codex). `--live`: L3 probe only — overrides `--offline`, and
+    /// exits 2 when codex is missing or unrunnable.
     Doctor {
         /// Path to the router TOML config (defaults to CODEXFERRY_CONFIG
         /// or ./cxf.toml, same rule as the server).
@@ -125,7 +122,7 @@ enum Commands {
         /// automatically (see `catalog::load_template`).
         #[arg(long)]
         codex_models: Option<PathBuf>,
-        /// Run the live wire-shape + tool round-trip probe.
+        /// Run the live wire-shape + tool round-trip probe; overrides `--offline`.
         #[arg(long)]
         live: bool,
         /// Skip live probes (L1 + L2 only). Useful for fast checks without codex.
