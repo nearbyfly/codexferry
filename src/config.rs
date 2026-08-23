@@ -780,26 +780,47 @@ pub fn spawn_watcher(path: &Path, shared: SharedConfig) -> anyhow::Result<impl W
     let mut watcher = notify::recommended_watcher(move |res: Result<notify::Event, _>| {
         if let Ok(event) = res {
             if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
-                match Config::parse_file(&watch_path).and_then(|c| c.validate()) {
-                    Ok(new_cfg) => {
-                        // notify callbacks are synchronous, so use try_write (non-blocking)
-                        // instead of awaiting the async RwLock. Low-frequency config changes
-                        // make contention unlikely; skip and warn if the lock is busy.
-                        if let Ok(mut guard) = shared.try_write() {
-                            *guard = new_cfg;
-                            tracing::info!("config reloaded successfully");
-                        } else {
-                            tracing::warn!(
-                                "config reload skipped: config lock busy, keeping current config"
-                            );
+                // Editors that save atomically (vim `set backupcopy=no`,
+                // emacs, many IDEs) write to a temp file then `rename(temp,
+                // target)` - the rename briefly unlinks the target before
+                // the new inode appears. The notify event lands during that
+                // gap, the parse_file fails with ENOENT, and the user sees
+                // `config reload failed` followed by a successful reload
+                // on the next event. Retry a couple of times with a tiny
+                // sleep so the spurious error disappears; non-ENOENT
+                // errors and ENOENT past the retry budget still surface
+                // (a real file deletion is a meaningful state change).
+                for attempt in 0..3 {
+                        match Config::parse_file(&watch_path).and_then(|c| c.validate()) {
+                            Ok(new_cfg) => {
+                                // notify callbacks are synchronous, so use try_write (non-blocking)
+                                // instead of awaiting the async RwLock. Low-frequency config changes
+                                // make contention unlikely; skip and warn if the lock is busy.
+                                if let Ok(mut guard) = shared.try_write() {
+                                    *guard = new_cfg;
+                                    tracing::info!("config reloaded successfully");
+                                } else {
+                                    tracing::warn!(
+                                        "config reload skipped: config lock busy, keeping current config"
+                                    );
+                                }
+                                break;
+                            }
+                            Err(ConfigError::Io(io_err))
+                                if io_err.kind() == std::io::ErrorKind::NotFound
+                                    && attempt < 2 =>
+                            {
+                                std::thread::sleep(std::time::Duration::from_millis(20));
+                                continue;
+                            }
+                            Err(e) => {
+                                tracing::error!("config reload failed, keeping old config: {e}");
+                                break;
+                            }
                         }
-                    }
-                    Err(e) => {
-                        tracing::error!("config reload failed, keeping old config: {e}");
                     }
                 }
             }
-        }
     })?;
     // Watch the file itself (non-recursive); the parent directory is what
     // actually gets watched, which also catches editors that rewrite the
