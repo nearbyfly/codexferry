@@ -343,7 +343,7 @@ codexferry/
 │   ├── bin/
 │   │   └── e2e-mock.rs     # scripted mock upstream for the E2E scripts (382)
 │   ├── config.rs           # TOML types + validation + hot reload (1,047)
-│   ├── doctor.rs           # doctor: mode-aware offline quick-checks (L1 config/wiring/mode/version status + L2.6 version age, mode-keyed advisories, pinned L2.7–L2.10 pin checks, dynamic L2.7'–L2.9' endpoint smoke/shape) + WARN/INFO/FAIL report/exit codes (2,345)
+│   ├── doctor.rs           # doctor: mode-aware offline quick-checks (L1 config/wiring/mode/version status + L2.6 version age, mode-keyed advisories, pinned L2.7–L2.10 pin checks, dynamic L2.7' pin-shadow WARN + L2.8'/L2.9' endpoint smoke/shape) + WARN/INFO/FAIL report/exit codes (2,345)
 │   ├── doctor_live.rs      # doctor --live: mode-aware L3 live probe (wiring mirrors the detected mode; live-catalog-fetch proof) — returns checks (1,241)
 │   ├── mode.rs             # codex wiring mode detection: pinned/dynamic/fallback (149)
 │   ├── version.rs          # codex client-version tripwire (`CodexVersionTracker`) + doctor state (383)

@@ -314,19 +314,20 @@ assert_doctor_offline_passes() { # $1 router-config-path, $2 expected-mode
   local out
   out=$(HOME="$ARTIFACT_DIR/doctor-home" "$REPO_ROOT/target/debug/codexferry" doctor --offline --config "$1" 2>&1 || true)
   DOCTOR_LAST_OUTPUT=$out
-  grep -qF 'INFO: detected mode' <<<"$out" || fail "doctor output missing detected-mode INFO line (expected $2)\n$out"
-  grep -qF "detected mode — $2 (" <<<"$out" || fail "doctor output detected a different mode than $2\n$out"
-  ! grep -qF 'FAIL:' <<<"$out" || fail "doctor output has FAIL lines (expected mode $2)\n$out"
+  grep -qF 'INFO: detected mode' <<<"$out" || fail "doctor output missing detected-mode INFO line (expected $2)"$'\n'"$out"
+  grep -qF "detected mode — $2 (" <<<"$out" || fail "doctor output detected a different mode than $2"$'\n'"$out"
+  ! grep -qF 'FAIL:' <<<"$out" || fail "doctor output has FAIL lines (expected mode $2)"$'\n'"$out"
 }
 
 # Same invocation as assert_doctor_offline_passes, but for scenarios that must
 # see a FAIL (currently unused; intended for future stale-pin scenarios).
 assert_doctor_offline_fails() { # $1 router-config-path, $2 expected-fail-substr
+  [ -n "${2:-}" ] || fail "expected-fail-substr is required"
   local out
   out=$(HOME="$ARTIFACT_DIR/doctor-home" "$REPO_ROOT/target/debug/codexferry" doctor --offline --config "$1" 2>&1 || true)
   DOCTOR_LAST_OUTPUT=$out
-  grep -qF 'FAIL:' <<<"$out" || fail "doctor output has no FAIL line (expected: $2)\n$out"
-  grep -qF "$2" <<<"$out" || fail "doctor output missing expected FAIL detail '$2'\n$out"
+  grep -qF 'FAIL:' <<<"$out" || fail "doctor output has no FAIL line (expected: $2)"$'\n'"$out"
+  grep -qF "$2" <<<"$out" || fail "doctor output missing expected FAIL detail '$2'"$'\n'"$out"
 }
 
 cleanup_procs() {

@@ -340,13 +340,13 @@ EOF
   assert_doctor_offline_passes "$cfg" Dynamic
   # No pin -> the L2.7' pin-shadow WARN must NOT fire in dynamic mode.
   ! grep -qF 'pin shadows live fetch' <<<"$DOCTOR_LAST_OUTPUT" \
-    || fail "dynamic wiring must not warn about a pin shadowing the live fetch\n$DOCTOR_LAST_OUTPUT"
+    || fail "dynamic wiring must not warn about a pin shadowing the live fetch"$'\n'"$DOCTOR_LAST_OUTPUT"
   grep -qF 'PASS: models endpoint reachable' <<<"$DOCTOR_LAST_OUTPUT" \
-    || fail "doctor missing PASS: models endpoint reachable\n$DOCTOR_LAST_OUTPUT"
+    || fail "doctor missing PASS: models endpoint reachable"$'\n'"$DOCTOR_LAST_OUTPUT"
   grep -qF 'PASS: models endpoint shape' <<<"$DOCTOR_LAST_OUTPUT" \
-    || fail "doctor missing PASS: models endpoint shape\n$DOCTOR_LAST_OUTPUT"
+    || fail "doctor missing PASS: models endpoint shape"$'\n'"$DOCTOR_LAST_OUTPUT"
   grep -qF 'INFO: codex version age' <<<"$DOCTOR_LAST_OUTPUT" \
-    || fail "doctor missing INFO: codex version age\n$DOCTOR_LAST_OUTPUT"
+    || fail "doctor missing INFO: codex version age"$'\n'"$DOCTOR_LAST_OUTPUT"
   cleanup_procs
   pass "doctor_dynamic"
 }
@@ -381,10 +381,10 @@ EOF
 
   assert_doctor_offline_passes "$cfg" Pinned
   grep -qF 'INFO: static catalog pin' <<<"$DOCTOR_LAST_OUTPUT" \
-    || fail "doctor missing INFO: static catalog pin\n$DOCTOR_LAST_OUTPUT"
+    || fail "doctor missing INFO: static catalog pin"$'\n'"$DOCTOR_LAST_OUTPUT"
   for name in 'pin exists and parses' 'pin covers router' 'pin matches router' 'pin entry shape'; do
     grep -qF "PASS: $name" <<<"$DOCTOR_LAST_OUTPUT" \
-      || fail "doctor missing PASS: $name\n$DOCTOR_LAST_OUTPUT"
+      || fail "doctor missing PASS: $name"$'\n'"$DOCTOR_LAST_OUTPUT"
   done
   cleanup_procs
   pass "doctor_pinned"
@@ -412,7 +412,7 @@ EOF
 
   assert_doctor_offline_passes "$cfg" Fallback
   grep -qF 'WARN: fallback wiring' <<<"$DOCTOR_LAST_OUTPUT" \
-    || fail "doctor missing WARN: fallback wiring\n$DOCTOR_LAST_OUTPUT"
+    || fail "doctor missing WARN: fallback wiring"$'\n'"$DOCTOR_LAST_OUTPUT"
   cleanup_procs
   pass "doctor_fallback"
 }

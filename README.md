@@ -506,7 +506,7 @@ installed or unrunnable — raised by the live path).
 
 | Observed failure | Diagnosis | Fix layer | Remediation snippet |
 |---|---|---|---|
-| Pin missing / unparseable | static-mode hard error | user config | rerun `codexferry gen-catalog --config cxf.toml --out ~/.codex/codexferry-catalog.json` |
+| `pin unreadable` | static-mode hard error | user config | rerun `codexferry gen-catalog --config cxf.toml --out ~/.codex/codexferry-catalog.json` |
 | `pin covers router` / `pin matches router` FAIL | stale pin OR stale router | gen-catalog or router config | rerun `codexferry gen-catalog`; check `cxf.toml` routes |
 | `pin entry shape` FAIL | Codex upgrade added a required field | codexferry release | upgrade codexferry; stopgap: hand-add the field |
 | `pin shadows live fetch` WARN | mixed static + dynamic wiring | user config | remove the pin or the `auth.command` — pick one mode |

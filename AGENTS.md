@@ -252,7 +252,8 @@ Codex CLI ──POST /v1/responses──▶ axum daemon (127.0.0.1:8787)
 | `catalog.rs` | `gen-catalog` + `build_catalog_value` shared with the live /models endpoint |
 | `models_cache.rs` | `CatalogCache`: route-fingerprint + template-mtime invalidation for live /models |
 | `mode.rs` | codex catalog-wiring mode detection (pinned/dynamic/fallback) from `~/.codex/config.toml` (`detect_mode` + `DEFAULT_ACTIVE_PROVIDER`) |
-| `doctor.rs` | doctor subcommand: mode-aware offline quick-checks (L1–L2 + mode-keyed advisories; pinned L2.7–L2.10 pin checks; dynamic L2.7'–L2.9' endpoint smoke/shape), WARN/INFO/FAIL report + exit codes |
+| `version.rs` | codex client-version tripwire (`CodexVersionTracker`) + doctor state (`DoctorState`) |
+| `doctor.rs` | doctor subcommand: mode-aware offline quick-checks (L1–L2 + mode-keyed advisories; pinned L2.7–L2.10 pin checks; dynamic L2.7' pin-shadow WARN + L2.8'/L2.9' endpoint smoke/shape), WARN/INFO/FAIL report + exit codes |
 | `doctor_live.rs` | doctor --live: mode-aware L3 live probe (probe wiring mirrors the detected mode; live-catalog-fetch proof via codex `models_cache.json`; returns checks for the combined default output) |
 | `logging.rs` | tracing-subscriber init |
 | `metrics.rs` | `Metrics`: Prometheus registry + `/metrics` encoding (upstream requests, tokens, latency, in-flight) |
