@@ -38,6 +38,7 @@ mod doctor_live;
 mod heal;
 mod logging;
 mod metrics;
+mod mode;
 mod models_cache;
 mod normalize;
 mod proxy;
