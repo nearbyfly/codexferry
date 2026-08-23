@@ -85,8 +85,8 @@ start_router() { # $1 config path — sets ROUTER_PORT/ROUTER_PID
 
 # Dynamic-mode run (canonical): codex exec with the e2e provider baked in
 # via auth.command, no model_catalog_json pin — codex fetches the live
-# /v1/models catalog (see run_codex_dynamic for the explicit mirror).
-# Never touches ~/.codex or the
+# /v1/models catalog (run_codex_dynamic delegates here, so there is a
+# single dynamic wiring body). Never touches ~/.codex or the
 # resident router's config: CODEX_HOME is redirected into the artifact dir so
 # sessions/state stay out of the real ~/.codex (`-s read-only` only bounds the
 # workspace sandbox, not the CLI's own storage).
@@ -193,26 +193,16 @@ run_codex_resume_static() { # args…: -m <route> "<prompt>"
     "$@" >"$ARTIFACT_DIR/codex-resume-$(date +%s%N).log" 2>&1
 }
 
-# Dynamic-mode run: auth command and NO model_catalog_json pin. This
-# mirrors run_codex exactly — under this wiring codex fetches the live
-# /v1/models catalog from the router each session start
-# (OpenAiModelsManager, has_command_auth gate), so scenarios using it can
-# assert the codex-side live-fetch proof (assert_live_catalog_fetched).
+# Dynamic-mode run: auth command and NO model_catalog_json pin. Identical
+# wiring to run_codex (the canonical dynamic helper), so this delegates to
+# it — a single body, and the two names cannot diverge. Under this wiring
+# codex fetches the live /v1/models catalog from the router each session
+# start (OpenAiModelsManager, has_command_auth gate), so scenarios using it
+# can assert the codex-side live-fetch proof (assert_live_catalog_fetched).
 # Deliberately no env_key: an env_key-only provider never fetches, which
 # would silently turn the scenario into the degraded fallback path.
 run_codex_dynamic() { # args…: -m <route> "<prompt>"
-  mkdir -p "$ARTIFACT_DIR/codex-home"
-  local sandbox_flags=(-s read-only)
-  if [ "${E2E_CODEX_SANDBOX:-read-only}" = bypass ]; then
-    sandbox_flags=(--dangerously-bypass-approvals-and-sandbox)
-  fi
-  CODEX_HOME="$ARTIFACT_DIR/codex-home" codex exec "${sandbox_flags[@]}" --skip-git-repo-check \
-    -c 'model_provider="e2e"' \
-    -c 'model_providers.e2e.name="e2e"' \
-    -c "model_providers.e2e.base_url=\"http://127.0.0.1:${ROUTER_PORT}/v1\"" \
-    -c 'model_providers.e2e.wire_api="responses"' \
-    -c 'model_providers.e2e.auth={command="echo",args=["dummy"]}' \
-    "$@" >"$ARTIFACT_DIR/codex-$(date +%s%N).log" 2>&1
+  run_codex "$@"
 }
 
 # Fallback-mode run: env_key only, NO model_catalog_json pin and NO auth
