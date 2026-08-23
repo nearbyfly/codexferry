@@ -359,17 +359,22 @@ the codex-required structural fields and a neutral `base_instructions`
 placeholder (codex ≥0.147 rejects any model carrying neither
 `base_instructions` nor `model_messages.instructions_template`).
 
-## Catalog Generation Policy (deny-by-default)
+## Catalog Generation Policy (static-mode generator only)
 
-`gen-catalog` inherits only two fields from the bundled Codex template:
-`base_instructions` and `model_messages` (the prompt fields that track the
-installed Codex version). All other template fields — dialect switches
-(`use_responses_lite`, `tool_mode`, `shell_type`, …), OpenAI-ecosystem fields
-(`include_*`, `service_tiers`, `upgrade`, …), TUI decoration — are dropped,
-and the dropped names are logged at generation time. Generated entries pin:
-`use_responses_lite=false`, `shell_type="default"`, `prefer_websockets=false`,
-`supports_parallel_tool_calls=true`, plus the codex-required structural fields
-`priority=99`, `support_verbosity=false`,
+`gen-catalog` only matters in **static mode** (codex pinned to a generated file
+via `model_catalog_json`). In dynamic mode the live `/v1/models` endpoint
+serves the catalog at session start — no generation step, no regeneration on
+route changes.
+
+In static mode the generator inherits only two fields from the bundled Codex
+template: `base_instructions` and `model_messages` (the prompt fields that
+track the installed Codex version). All other template fields — dialect
+switches (`use_responses_lite`, `tool_mode`, `shell_type`, …), OpenAI-ecosystem
+fields (`include_*`, `service_tiers`, `upgrade`, …), TUI decoration — are
+dropped, and the dropped names are logged at generation time. Generated
+entries pin: `use_responses_lite=false`, `shell_type="default"`,
+`prefer_websockets=false`, `supports_parallel_tool_calls=true`, plus the
+codex-required structural fields `priority=99`, `support_verbosity=false`,
 `truncation_policy={mode:"tokens",limit:10000}`,
 `experimental_supported_tools=[]`, and an always-emitted
 `supported_reasoning_levels` ladder (codex ≥0.147's ModelInfo has no serde
@@ -378,7 +383,7 @@ default for these — a catalog missing them is rejected outright).
 Background: the 2026-08-17 DSML leak — the template's `use_responses_lite=true`
 made codex 0.147 deliver tools as `additional_tools` input items that
 third-party upstreams cannot bind, so tool calls leaked as DSML text.
-Deny-by-default makes future template fields inert instead of leaking onto the
+Deny-by-default keeps future template fields inert instead of leaking onto the
 wire.
 
 ## doctor: regression check after Codex upgrades
@@ -430,129 +435,9 @@ WantedBy=multi-user.target
 ```
 
 The proxy handles SIGTERM gracefully (stops accepting new connections, lets
-in-flight requests complete).
+in-flight requests complete).## Building & Testing
 
-## How It Works
-
-### Chat format providers (`format = "chat"`)
-
-```
-Codex CLI                    codexferry                    Upstream
-    │                             │                             │
-    │── POST /v1/responses ──────▶│                             │
-    │   (Responses API, SSE)      │── POST /chat/completions ─▶│
-    │                             │   (Chat Completions, SSE)   │
-    │◀── Responses SSE ───────────│◀── Chat SSE ───────────────│
-    │   (token-by-token)          │   (converted)               │
-```
-
-The proxy:
-1. Converts the Responses request to Chat Completions format.
-2. Forwards to `${base_url}/chat/completions`.
-3. Converts the Chat SSE stream to Responses SSE events in real time.
-4. Generates a `resp_<uuid>` ID and stores the conversation context.
-
-### Responses format providers (`format = "responses"`)
-
-The proxy forwards the request to `${base_url}/responses` with the model name
-replaced and authorization header injected. The SSE stream is passed through
-(byte-for-byte verbatim when healing is off; leaked DSML/think markup is healed
-event-granular when the `dsml_heal`/`think_tags` quirks fire). Session state is
-captured from the `response.completed` event.
-
-### Request normalization (Codex private dialects)
-
-Codex occasionally delivers parts of a request in OpenAI-internal dialect
-shapes that third-party upstreams never defined. The proxy normalizes them
-before forwarding:
-
-- **`additional_tools` hoisting** (both formats): Codex ≥0.147 can deliver its
-  toolset as `additional_tools` input items (namespace-wrapped) instead of the
-  top-level `tools` array. The proxy hoists every function-shaped tool into the
-  top-level `tools` array (name-deduplicated) and strips the non-standard item.
-- **Chat-path namespace flattening**: `namespace` tool entries (e.g. Codex's
-  multi-agent tools) are flattened into their inner function tools with names
-  encoded as `{namespace}-{name}` (e.g. `multi_agent_v1-spawn_agent`), which
-  Chat upstreams can bind. The proxy builds a decode map from the request's
-  tools and restores an independent `namespace` field on response tool calls,
-  so Codex can dispatch them. Responses upstreams leave namespace entries
-  verbatim.
-- **Unknown-type visibility**: unknown input item types and tool types are
-  never silently swallowed — they pass through or are dropped, and are logged
-  with a process-lifetime counter (`unknown input item type(s) passed
-  through/dropped: ...`, `tool type(s) not mappable to chat dropped: ...`), so a
-  new Codex dialect shows up in the logs instead of degrading silently.
-
-### Session state
-
-When Codex sends `previous_response_id`, the proxy:
-1. Looks up the stored conversation context.
-2. Merges it with the new input.
-3. Converts the full history (including reasoning items → `reasoning_content`),
-   merging each turn's assistant text + tool calls into one message and
-   synthesizing `call_<uuid>` ids when an upstream omitted tool-call ids.
-4. Stores the new complete context under a new response ID.
-
-Requests with `store: false` skip step 4 entirely: Codex in that mode replays
-its full transcript inline on every turn and never sends
-`previous_response_id`, so a stored snapshot would never be read back (this
-also avoids the O(n²) memory growth of full-context snapshots).
-
-This is what makes model switching seamless: you can start with DeepSeek and
-continue with GLM mid-session, and the full history (including reasoning) is
-preserved. From Codex's point of view this is just switching models — the
-router silently keeps the conversation coherent across upstreams.
-
-Known limitation: sessions captured by responses-format passthrough are stored
-verbatim; if such an upstream emits a function call with an empty
-`call_id`, replaying that session on a chat-format route sends
-`tool_calls[].id: ""`, which strict providers reject for the remainder of the
-session's TTL. Router-converted responses are not affected.
-
-## Building & Testing
-
-```bash
-# Debug build
-cargo build
-
-# Release build
-cargo build --release
-
-# Run all tests (unit + integration)
-cargo test
-
-# Run only unit tests (this is a binary-only crate, so use --bin)
-cargo test --bin codexferry
-
-# Run only integration tests (spawns real binary + mock upstream)
-cargo test --test integration
-
-# See request/response bodies (debug)
-CODEXFERRY_TRACE_BODY=1 RUST_LOG=codexferry=debug cargo run
-```
-
-## End-to-End Tests
-
-Two manual scripts drive the **real Codex CLI** through the router (they are
-not part of `cargo test`; they need `codex` on PATH, `python3`, and `curl`):
-
-- `scripts/e2e.sh [basic|models|tools|multiturn|all]` — deterministic layer:
-  a scripted mock upstream (`src/bin/e2e-mock.rs`) plus a temp router; the
-  mock-layer scenarios assert against three sources (CLI output, the mock's
-  recorded requests, the router's `/metrics`).
-- `E2E_REAL_ROUTES="route1 route2" scripts/e2e-real.sh` — opt-in real-provider
-  smoke (spends tokens; starts a dedicated router from your real config with
-  a rewritten ephemeral port, so the resident instance is untouched).
-
-On failure, all artifacts (CLI logs, mock request records, router log) are
-left in the temp directory printed at the end of the run.
-
-The `tools` scenario always runs Codex with
-`--dangerously-bypass-approvals-and-sandbox` (via `E2E_CODEX_SANDBOX=bypass`):
-bwrap needs user namespaces, which externally sandboxed containers cannot
-create, so a normal sandbox makes even `echo` fail. `scripts/e2e-real.sh`
-refuses to run whenever `E2E_CODEX_SANDBOX=bypass` is set, because real
-providers must never run past the sandbox.
+See [BUILD.md](./BUILD.md) for build and test commands.
 
 ## Documentation
 

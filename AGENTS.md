@@ -21,11 +21,6 @@ not carried over in the migration. Those section numbers resolve against
 `codex-router-rs` repo. They are kept because they mark genuine provenance —
 treat them as pointers to history, not to a file in this repo.
 
-## Commit Convention
-
-Conventional Commits (`feat:`, `fix:`, `test:`). Reference spec sections in
-parentheses when relevant, e.g. `fix: emit content_part.added (spec §7.3)`.
-
 ## Critical Conventions
 
 ### 1. Route key format is `provider/alias` — first `/` splits

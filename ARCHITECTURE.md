@@ -326,7 +326,8 @@ codexferry/
 ├── cxf.toml.example         # Router config template (real cxf.toml is gitignored)
 ├── AGENTS.md               # AI agent notes
 ├── ARCHITECTURE.md         # This file
-├── README.md               # User guide
+├── BUILD.md                # Build, test, and e2e commands (split out of README)
+├── README.md               # User guide (usage + static/dynamic catalog intro)
 ├── scripts/
 │   ├── e2e-lib.sh           # E2E shared helpers: sandbox selection + run_codex (215)
 │   ├── e2e.sh               # deterministic E2E layer: basic/models/tools/multiturn (199)
@@ -390,13 +391,3 @@ codexferry/
 > Update them when making significant changes.
 
 ~18,748 lines total. 314 tests (273 unit + 5 e2e-mock unit + 35 integration + 1 ignored).
-
-**Catalog generation is deny-by-default**: the allowlist inherits only
-`base_instructions` and `model_messages` from the bundled Codex template; every
-other template field (dialect switches, OpenAI-ecosystem fields, TUI
-decoration) is dropped and logged at generation time. See the README's
-"Catalog Generation Policy (deny-by-default)" for the full policy and the
-`doctor` upgrade runbook. **`doctor`** (offline, default) regenerates the
-catalog in memory and deep-compares it against the installed one to detect any
-drift; `--live` drives the installed Codex CLI through an in-process router +
-mock upstream, asserting the normalized wire shape and a full tool round-trip.
