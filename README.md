@@ -93,15 +93,20 @@ care) that different models may be backed by different providers.
 ### 6. Use
 
 ```bash
-codex -m deepseek/deepseek-v4-flash
-codex -m deepseek/deepseek-v4-pro
-# Switch an exec conversation to a model backed by a different provider,
-# carrying the full history across:
-codex exec resume --last --skip-git-repo-check -m ark/glm-5.2 "continue"
+# Start a fresh interactive session on the configured default model.
+codex
+
+# Continue yesterday's session on a different model - full history carried
+# over, no model metadata gets lost (same router-generated catalog on both
+# sides). Equivalent headless form: codex exec resume --last -m ... .
+codex resume --last -m ark/glm-5.2
+
+# Resume with the picker instead of --last (lets you choose session AND model):
+codex resume
 ```
 
-For adding/removing routes on the fly (what works immediately, what needs a
-resume, what needs a TUI restart), see
+For what works immediately when you add or remove routes, and what needs a
+`codex resume --last -m ...` or a TUI restart, see
 [Adding and removing routes](#adding-and-removing-routes-dynamic-mode).
 
 ## Configuration Reference
@@ -311,14 +316,16 @@ can be *selected*, never what is *already selected*.
 **Adding a route** - new sessions see it immediately, running ones do not:
 
 ```bash
-# Immediate: any newly started codex process resolves the new route.
+# Immediate: a fresh codex process resolves the new route.
 codex exec --skip-git-repo-check -m sensenova/glm-5.2 "task"
 
-# Immediate, and carries an existing conversation over to the new route
-# (full history preserved, cross-provider and cross-wire both fine).
-codex exec resume --last --skip-git-repo-check -m sensenova/glm-5.2 "continue"
+# Immediate, and the everyday workflow: continue the previous session on
+# the new route with full history (cross-provider and cross-wire both
+# fine). Without --last the picker lets you pick session + model.
+codex resume --last -m sensenova/glm-5.2
 
-# Immediate: restart the TUI and the /model picker lists it.
+# Immediate: a fresh TUI boot picks up the route in its /model list.
+codex
 ```
 
 A *running* TUI's `/model` picker will not list the new route: codex takes
@@ -336,7 +343,7 @@ the removed route fail on their next turn:
   recorded model and keeps 400ing):
 
 ```bash
-codex exec resume --last --skip-git-repo-check -m deepseek/deepseek-v4-flash "continue"
+codex resume --last -m deepseek/deepseek-v4-flash "continue"
 ```
 
 - An active TUI conversation on the removed route: switch via `/model` to a
