@@ -4,9 +4,9 @@
 
 ## Why codexferry
 
-Native codex takes one provider per session and only speaks the Responses API. That works for OpenAI, but most Chinese and indie providers only expose Chat Completions — `codex -m` can't reach them at all, and switching providers means reconfiguring codex between sessions.
+Native codex takes one provider per session and only speaks the Responses API. Most open-source model providers (SiliconFlow, Ollama, etc.) only expose Chat Completions — `codex -m` can't reach them at all, and switching providers mid-session means reconfiguring codex.
 
-codexferry is one provider (`codexferry`) backed by an internal router. `cxf.toml` lists every upstream; `codex -m provider/alias` picks one, `codex resume --last -m …` switches mid-session. The router translates Responses ↔ Chat per route, so you can mix Responses-only and Chat-only upstreams behind the same codex endpoint.
+codexferry is one provider (`codexferry`) backed by an internal router. `cxf.toml` lists every upstream; `codex -m provider/alias` picks one, `codex resume --last -m …` switches mid-session. The router translates Responses ↔ Chat per route, so you can use any upstream behind the same codex endpoint — providers that already speak Responses pass through verbatim, Chat-only ones get the conversion on the fly.
 
 ## Features
 
