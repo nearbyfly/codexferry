@@ -4,7 +4,9 @@
 
 ## Why codexferry
 
-Codex CLI talks the OpenAI Responses API. Most Chinese and indie LLM providers only expose Chat Completions. codexferry is a tiny Rust daemon that sits between them: it exposes Responses, translates to Chat Completions per-provider, and exposes every upstream model as a `provider/alias` route you select with `codex -m`. Add a route to `cxf.toml` and it's available in the next Codex turn — no restart.
+Native codex takes one provider per session and only speaks the Responses API. That works for OpenAI, but most Chinese and indie providers only expose Chat Completions — `codex -m` can't reach them at all, and switching providers means reconfiguring codex between sessions.
+
+codexferry is one provider (`codexferry`) backed by an internal router. `cxf.toml` lists every upstream; `codex -m provider/alias` picks one, `codex resume --last -m …` switches mid-session. The router translates Responses ↔ Chat per route, so you can mix Responses-only and Chat-only upstreams behind the same codex endpoint.
 
 ## Features
 
