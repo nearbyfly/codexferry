@@ -151,6 +151,14 @@ git push origin "$RELEASE_BRANCH" "$TAG"
 log "pushing release branch + tag to github"
 git push github "$RELEASE_BRANCH" "$TAG"
 
+# Fast-forward github's `main` to the release commit. This makes
+# `git clone github.com:nearbyfly/codexferry` checkout v0.X.Y by default
+# AND keeps the per-release branch around for inspection. We only push
+# `main` on the github remote - never on origin (gitea) - because
+# gitea already tracks the full main including docs/.
+log "fast-forwarding github main to release"
+git push github "$RELEASE_BRANCH:refs/heads/main"
+
 # ---------- github release ----------
 
 if [[ "$GH_RELEASE" -eq 0 ]]; then
