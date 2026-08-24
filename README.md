@@ -9,29 +9,26 @@ Native codex takes one provider per session and only speaks the Responses API. M
 codexferry is one provider (`codexferry`) backed by an internal router. `cxf.toml` lists every upstream; `codex -m provider/alias` picks one, `codex resume --last -m …` switches mid-session. The router translates Responses ↔ Chat per route, so you can use any upstream behind the same codex endpoint — providers that already speak Responses pass through verbatim, Chat-only ones get the conversion on the fly.
 
 ```
-┌─── codexferry dynamic config ──────────────────────────────────┐
-│                                                                │
-│   cxf.toml edit → hot-reload → next codex turn sees new routes  │
-│                                                                │
-└────────────────────────────────────────────────────────────────┘
+┌─── codexferry dynamic config ────────────────────────────────┐
+│                                                              │
+│   cxf.toml edit → hot-reload → next codex turn sees new routes │
+│                                                              │
+└──────────────────────────────────────────────────────────────┘
 
-                  ┌────── codex session ──────┐
-                  │   one provider:           │
-                  │   `codexferry`            │
-                  └────────────┬──────────────┘
-                               │
-                  ┌────────────┴────────────┐
-                  ▼                           ▼
-           ┌─────────────┐            ┌────────────────┐
-           │  responses   │            │      chat       │
-           │  upstream    │            │      upstream   │
-           │              │            │   + heal        │
-           │  passthrough │            │   Responses →   │
-           │  (verbatim)  │            │   Chat          │
-           └──────┬──────┘            └────────┬───────┘
-                  │                              │
-                  ▼                              ▼
-             upstream A                      upstream B
+                 ┌──── codex session ────┐
+                 │   one provider:       │
+                 │   `codexferry`        │
+                 └──────────┬────────────┘
+                            │
+                ┌───────────┴───────────┐
+                ▼                       ▼
+         ┌──────────────────┐   ┌──────────────────┐
+         │  responses        │   │       chat        │
+         │  upstream         │   │    upstream       │
+         │  passthrough      │   │    + heal         │
+         │  (verbatim)       │   │   Responses →    │
+         │                    │   │    Chat          │
+         └──────────────────┘   └──────────────────┘
 
 
    switch mid-session (full history carried):
@@ -78,7 +75,7 @@ export DEEPSEEK_API_KEY=sk-...
 codex -m deepseek/deepseek-v4-flash
 ```
 
-Full field reference and every config knob live in [README-DETAILS.md](./README-DETAILS.md). Build, test, and doctor guidance live in [BUILD.md](./BUILD.md). Cadence + release flow in [RELEASE.md](./RELEASE.md).
+Full field reference and every config knob live in [README-DETAILS.md](./README-DETAILS.md). Build, test, and e2e commands live in README-DETAILS's "Build, test, end-to-end" section. Cadence + release flow in [RELEASE.md](./RELEASE.md).
 
 ## Two config modes
 
@@ -101,8 +98,7 @@ codex exec resume --last --skip-git-repo-check -m deepseek/deepseek-v4-flash "co
 
 ## See also
 
-- [README-DETAILS.md](./README-DETAILS.md) — config field reference, env vars, endpoints, dynamic/generated runbook, doctor flags & bisection, systemd unit, troubleshooting.
-- [BUILD.md](./BUILD.md) — `cargo test`, e2e, `doctor --live`.
+- [README-DETAILS.md](./README-DETAILS.md) — config field reference, env vars, endpoints, dynamic/generated runbook, doctor flags & bisection, systemd unit, build/test/e2e commands, troubleshooting.
 - [RELEASE.md](./RELEASE.md) — when and how to cut a release (GitHub + Gitea).
 - [ARCHITECTURE.md](./ARCHITECTURE.md) — module map, request/SSE flows, session design.
 

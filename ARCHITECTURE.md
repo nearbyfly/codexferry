@@ -326,8 +326,8 @@ codexferry/
 ├── cxf.toml.example         # Router config template (real cxf.toml is gitignored)
 ├── AGENTS.md               # AI agent notes
 ├── ARCHITECTURE.md         # This file
-├── BUILD.md                # Build, test, and e2e commands (split out of README)
-├── README.md               # User guide (usage + static/dynamic catalog intro)
+├── README.md               # User guide (lite, dynamic/generated config + workflow diagram)
+├── README-DETAILS.md       # Reference: config schema, endpoints, modes, doctor bisection, build/test
 ├── scripts/
 │   ├── e2e-lib.sh           # E2E shared helpers: sandbox selection + run_codex + doctor assertions (336)
 │   ├── e2e.sh               # deterministic E2E layer: basic/models/tools/multiturn + doctor scenarios (443)
