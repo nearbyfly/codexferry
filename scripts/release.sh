@@ -156,8 +156,15 @@ git push github "$RELEASE_BRANCH" "$TAG"
 # AND keeps the per-release branch around for inspection. We only push
 # `main` on the github remote - never on origin (gitea) - because
 # gitea already tracks the full main including docs/.
-log "fast-forwarding github main to release"
-git push github "$RELEASE_BRANCH:refs/heads/main"
+#
+# We use `--force-with-lease=<expected>` rather than a plain fast-forward:
+# github's main can diverge from local main between releases (e.g. when
+# someone resets it via web UI, or after a force-push in a previous
+# release). --force-with-lease refuses to clobber unexpected SHAs, so a
+# typo in this script or a stray commit can't silently destroy history.
+EXPECTED_SHA="$(git rev-parse github/main 2>/dev/null || echo 0000000000000000000000000000000000000000)"
+log "fast-forwarding github main to release (expected current tip: ${EXPECTED_SHA:0:12})"
+git push github "$RELEASE_BRANCH:refs/heads/main" --force-with-lease="$EXPECTED_SHA:refs/heads/main"
 log "verify on github: https://github.com/nearbyfly/codexferry/releases/tag/$TAG"
 
 # ---------- github release ----------
