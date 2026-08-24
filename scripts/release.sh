@@ -90,7 +90,7 @@ if git branch --list "$RELEASE_BRANCH" | grep -q .; then
 fi
 
 # Cargo.toml version sync check (warning, not fatal, when --bump-cargo is off).
-CARGO_VER="$(grep '^version ' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+CARGO_VER="$(grep '^version = ' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
 log "preflight: Cargo.toml version is $CARGO_VER"
 if [[ "$BUMP_CARGO" -eq 0 && "${TAG#v}" != "$CARGO_VER" ]]; then
   log "WARNING: tag $TAG != Cargo.toml version $CARGO_VER - pass --bump-cargo to sync"
@@ -140,7 +140,7 @@ git tag -a "$TAG" -m "$TAG"
 if [[ "$DRY_RUN" -eq 1 ]]; then
   log "DRY RUN - not pushing to origin or github"
   log "release branch: $RELEASE_BRANCH, tag: $TAG"
-  log "to complete: git push origin $RELEASE_BRANCH $TAG && git push github $RELEASE_BRANCH $TAG"
+  log "to complete: git push origin $RELEASE_BRANCH $TAG && git push github $RELEASE_BRANCH $TAG && git push github $RELEASE_BRANCH:refs/heads/main"
   log "and re-run without --dry-run (with GITHUB_TOKEN set) for the GitHub Release"
   exit 0
 fi
@@ -158,6 +158,7 @@ git push github "$RELEASE_BRANCH" "$TAG"
 # gitea already tracks the full main including docs/.
 log "fast-forwarding github main to release"
 git push github "$RELEASE_BRANCH:refs/heads/main"
+log "verify on github: https://github.com/nearbyfly/codexferry/releases/tag/$TAG"
 
 # ---------- github release ----------
 
