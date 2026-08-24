@@ -319,7 +319,8 @@ pub async fn serve(
     }
 
     // Share the validated config behind an RwLock; the notify watcher
-    // hot-reloads it in place (non-blocking try_write, AGENTS.md #7).
+    // hot-reloads it in place via a channel + async applier (updates are
+    // queued while the lock is busy, never dropped - AGENTS.md #7).
     let shared: SharedConfig = Arc::new(RwLock::new(validated.clone()));
     let _watcher = spawn_watcher(config_path, shared.clone())?;
 

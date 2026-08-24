@@ -43,8 +43,10 @@
 //! atomically replaces the old one in the shared [`SharedConfig`]; on
 //! failure the **old config is kept** and the error is logged (the process
 //! never exits because of a bad edit). Because `notify` callbacks run on a
-//! synchronous thread, the reload uses the non-blocking `try_write()` — see
-//! the `spawn_watcher` docs for why.
+//! synchronous thread, the callback only sends the parsed config into an
+//! unbounded channel; an applier task on the tokio runtime awaits the write
+//! lock, so an update is queued while the lock is busy and never lost - see
+//! the `spawn_watcher` docs for details.
 
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -753,30 +755,40 @@ pub type SharedConfig = Arc<RwLock<ValidatedConfig>>;
 /// On parse error, keeps old config and logs error.
 ///
 /// Uses the `notify` crate to watch the config file for `Modify`/`Create`
-/// events. On each event the file is re-read and re-validated:
+/// events. On each event the file is re-read, re-validated, and sent over
+/// an unbounded channel to an applier task on the tokio runtime:
 ///
-/// * **Success** — the new config atomically replaces the old one in
-///   `shared`; `config reloaded successfully` is logged at info level.
-/// * **Parse/validation error** — the old config is kept and the error is
+/// * **Success** - the new config atomically replaces the old one in
+///   `shared` (the applier awaits the write lock); `config reloaded
+///   successfully` is logged at info level.
+/// * **Parse/validation error** - the old config is kept and the error is
 ///   logged at error level; the process keeps running with the last good
 ///   config (no restart, no crash).
 ///
-/// ### Non-blocking `try_write()` design (AGENTS.md convention #7)
+/// ### Channel + async applier design
 ///
-/// `notify` invokes this callback on a synchronous thread, which cannot
-/// `await` the async `RwLock`. The callback therefore uses the non-blocking
-/// `shared.try_write()`: if a request currently holds the lock, the reload
-/// is **skipped** with a warning. This is acceptable for a personal-use tool
-/// with low-frequency config changes. Do **not** switch to a blocking
-/// `write()` — it would deadlock the notify thread.
+/// `notify` invokes its callback on a synchronous thread, which cannot
+/// `await` the async `RwLock` (a blocking `write()` there would stall the
+/// notify thread behind every in-flight request). Instead the callback only
+/// does a non-blocking `send` into an unbounded channel, and the
+/// [`spawn_config_applier`] task on the tokio runtime loops over the
+/// receiver and awaits the write lock. This keeps the notify thread free,
+/// guarantees delivery (an unbounded send cannot fail while the applier
+/// holds the receiver), and lets the write wait patiently behind read
+/// guards - an update is queued while the lock is busy, never dropped.
 ///
 /// The returned `impl Watcher` must be kept alive for the process lifetime
 /// (the caller in `proxy::serve` stores it in `_watcher`); dropping it stops
-/// watching.
+/// watching and closes the channel, which ends the applier task.
 pub fn spawn_watcher(path: &Path, shared: SharedConfig) -> anyhow::Result<impl Watcher> {
     let path = path.to_path_buf();
     let watch_path = path.clone();
-    let shared = shared.clone();
+    // Decouple the synchronous notify callback from the async RwLock: the
+    // callback only sends (never blocks, never loses an update), and the
+    // applier task awaits the write lock on the tokio runtime.
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ValidatedConfig>();
+    let _applier = tokio::spawn(spawn_config_applier(shared, rx));
+
     let mut watcher = notify::recommended_watcher(move |res: Result<notify::Event, _>| {
         if let Ok(event) = res {
             if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
@@ -791,43 +803,51 @@ pub fn spawn_watcher(path: &Path, shared: SharedConfig) -> anyhow::Result<impl W
                 // errors and ENOENT past the retry budget still surface
                 // (a real file deletion is a meaningful state change).
                 for attempt in 0..3 {
-                        match Config::parse_file(&watch_path).and_then(|c| c.validate()) {
-                            Ok(new_cfg) => {
-                                // notify callbacks are synchronous, so use try_write (non-blocking)
-                                // instead of awaiting the async RwLock. Low-frequency config changes
-                                // make contention unlikely; skip and warn if the lock is busy.
-                                if let Ok(mut guard) = shared.try_write() {
-                                    *guard = new_cfg;
-                                    tracing::info!("config reloaded successfully");
-                                    invalidate_codex_catalog_cache();
-                                } else {
-                                    tracing::warn!(
-                                        "config reload skipped: config lock busy, keeping current config"
-                                    );
-                                }
-                                break;
-                            }
-                            Err(ConfigError::Io(io_err))
-                                if io_err.kind() == std::io::ErrorKind::NotFound
-                                    && attempt < 2 =>
-                            {
-                                std::thread::sleep(std::time::Duration::from_millis(20));
-                                continue;
-                            }
-                            Err(e) => {
-                                tracing::error!("config reload failed, keeping old config: {e}");
-                                break;
-                            }
+                    match Config::parse_file(&watch_path).and_then(|c| c.validate()) {
+                        Ok(new_cfg) => {
+                            // Unbounded send: cannot fail while the
+                            // applier task holds the receiver. If it
+                            // has already shut down (daemon exit), the
+                            // update is moot - ignore the error.
+                            let _ = tx.send(new_cfg);
+                            break;
+                        }
+                        Err(ConfigError::Io(io_err))
+                            if io_err.kind() == std::io::ErrorKind::NotFound && attempt < 2 =>
+                        {
+                            std::thread::sleep(std::time::Duration::from_millis(20));
+                            continue;
+                        }
+                        Err(e) => {
+                            tracing::error!("config reload failed, keeping old config: {e}");
+                            break;
                         }
                     }
                 }
             }
+        }
     })?;
     // Watch the file itself (non-recursive); the parent directory is what
     // actually gets watched, which also catches editors that rewrite the
     // file via rename.
     watcher.watch(&path, RecursiveMode::NonRecursive)?;
     Ok(watcher)
+}
+
+/// Applier loop for hot-reloaded configs: receives validated configs from
+/// the notify callback's channel and swaps them into `shared` under the
+/// write lock. Unlike the previous `try_write` design, an update sent while
+/// the lock is busy is queued, not dropped - it is applied as soon as
+/// in-flight requests release their read guards.
+async fn spawn_config_applier(
+    shared: SharedConfig,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<ValidatedConfig>,
+) {
+    while let Some(new_cfg) = rx.recv().await {
+        *shared.write().await = new_cfg;
+        tracing::info!("config reloaded successfully");
+        invalidate_codex_catalog_cache();
+    }
 }
 
 /// Codex CLI writes `~/.codex/models_cache.json` after a successful
@@ -910,8 +930,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(DEFAULT_CONFIG_FILENAME), "").unwrap();
         std::fs::write(dir.path().join(LEGACY_CONFIG_FILENAME), "").unwrap();
-        let (path, legacy) =
-            resolve_default_config(Some("/explicit/cxf.toml"), dir.path());
+        let (path, legacy) = resolve_default_config(Some("/explicit/cxf.toml"), dir.path());
         assert_eq!(path, std::path::PathBuf::from("/explicit/cxf.toml"));
         assert!(!legacy);
     }
@@ -1043,5 +1062,67 @@ format = "xml"
         assert_eq!(cfg.session.ttl_hours, 168);
         assert_eq!(cfg.session.max_sessions, 256);
         assert_eq!(cfg.session.max_memory_mb, 512);
+    }
+
+    /// A config change must be applied even when a request holds the read
+    /// lock at the moment the notify event fires. The channel-based applier
+    /// must queue the update and apply it once the lock is released - this
+    /// guards against regressing to a try_write design that would silently
+    /// drop the update under contention.
+    #[tokio::test]
+    async fn config_reload_applies_when_read_lock_held_during_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cxf.toml");
+        let config_a = r#"
+[providers.x]
+base_url = "https://x.com/v1"
+api_key = "old-key"
+format = "chat"
+[routes]
+"x/flash" = { model = "m" }
+"#;
+        let config_b = r#"
+[providers.x]
+base_url = "https://x.com/v1"
+api_key = "new-key"
+format = "chat"
+[routes]
+"x/flash" = { model = "m" }
+"#;
+        std::fs::write(&path, config_a).unwrap();
+        let shared: SharedConfig = Arc::new(RwLock::new(make_config(config_a)));
+        let _watcher = spawn_watcher(&path, shared.clone()).unwrap();
+
+        // Simulate an in-flight request: hold the read lock so the notify
+        // callback's try_write (or the applier's write) cannot proceed.
+        let guard = shared.read().await;
+        std::fs::write(&path, config_b).unwrap();
+        // Give the notify callback time to fire and fail to acquire the
+        // write lock while the read guard is still held.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        drop(guard);
+
+        // The update must eventually land - poll instead of a single sleep
+        // so the test is robust on slow filesystems.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let applied = {
+                let cfg = shared.read().await;
+                cfg.providers
+                    .get("x")
+                    .and_then(|p| p.api_key.as_deref())
+                    .map(|k| k == "new-key")
+                    .unwrap_or(false)
+            };
+            if applied {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "config reload was lost: api_key is still not 'new-key' \
+                 after the read lock was released"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
     }
 }

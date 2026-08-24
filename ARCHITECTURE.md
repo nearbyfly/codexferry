@@ -283,7 +283,7 @@ Turn 2: codex -m ark/glm-5.2  (switch provider!)
   - No duplicate route keys.
   - Each provider must have an API key (`api_key` / `api_key_env` / `api_key_file`).
   - `format` must be `chat` or `responses`.
-- **Hot reload**: `notify` watcher → `try_write()` (non-blocking, skips if lock busy).
+- **Hot reload**: `notify` watcher → unbounded channel → async applier task (queues while lock busy, never drops updates).
 - **API key resolution order**: `api_key` (plaintext) → `api_key_env` (env var) → `api_key_file` (file, trimmed).
 
 ## 8. Endpoints

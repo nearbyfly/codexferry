@@ -83,13 +83,16 @@ boolean `false` disables — absent or `true` stores as before): Codex sends
 `store: false` and replays its full transcript inline every turn, so the
 snapshot would never be read back.
 
-### 7. Config hot-reload uses `try_write()` (non-blocking)
+### 7. Config hot-reload uses a channel + async applier (no lost updates)
 
 The `notify` watcher callback runs on a synchronous thread. It uses
-`shared.try_write()` instead of awaiting an async `RwLock`. If the lock is busy
-(during an active request), the reload is **skipped** with a warning log. This
-is acceptable for a personal-use tool with low-frequency config changes. Do not
-change to blocking `write()` — it would deadlock the notify thread.
+`tokio::sync::mpsc::unbounded_channel` to send the parsed config to an
+applier task on the tokio runtime, which awaits the async `RwLock` write.
+If the lock is busy (during an active request), the update is **queued** in
+the channel and applied as soon as read guards release. Do not call a
+blocking `write()` from the notify callback itself - it would stall the
+notify thread behind every in-flight request. The channel indirection keeps
+the notify thread free while guaranteeing delivery.
 
 ### 8. Tool calls are accumulated during streaming, emitted at stream end
 
