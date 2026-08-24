@@ -8,6 +8,37 @@ Native codex takes one provider per session and only speaks the Responses API. M
 
 codexferry is one provider (`codexferry`) backed by an internal router. `cxf.toml` lists every upstream; `codex -m provider/alias` picks one, `codex resume --last -m …` switches mid-session. The router translates Responses ↔ Chat per route, so you can use any upstream behind the same codex endpoint — providers that already speak Responses pass through verbatim, Chat-only ones get the conversion on the fly.
 
+```
+┌─── codexferry dynamic config ──────────────────────────────────┐
+│                                                                │
+│   cxf.toml edit → hot-reload → next codex turn sees new routes  │
+│                                                                │
+└────────────────────────────────────────────────────────────────┘
+
+                  ┌────── codex session ──────┐
+                  │   one provider:           │
+                  │   `codexferry`            │
+                  └────────────┬──────────────┘
+                               │
+                  ┌────────────┴────────────┐
+                  ▼                           ▼
+           ┌─────────────┐            ┌────────────────┐
+           │  responses   │            │      chat       │
+           │  upstream    │            │      upstream   │
+           │              │            │   + heal        │
+           │  passthrough │            │   Responses →   │
+           │  (verbatim)  │            │   Chat          │
+           └──────┬──────┘            └────────┬───────┘
+                  │                              │
+                  ▼                              ▼
+             upstream A                      upstream B
+
+
+   switch mid-session (full history carried):
+     codex -m upstream-A-route
+     codex resume --last -m upstream-B-route
+```
+
 ## Features
 
 - **Lite** — single Rust binary, ~30 MB resident, **no system dependencies** (uses rustls, not OpenSSL).
