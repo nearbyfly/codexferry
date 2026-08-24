@@ -110,16 +110,26 @@ else
   STRIPPED_DOCS=0
 fi
 
-# Cargo.toml version bump (separate commit so the bump is diffable in PR review).
+# Cargo.toml version bump + Cargo.lock (lockfile changes with version).
+# Combined into the same commit as the docs strip below so we never emit
+# an empty "nothing to commit" under `set -euo pipefail`.
 if [[ "$BUMP_CARGO" -eq 1 ]]; then
   log "bumping Cargo.toml: $CARGO_VER -> ${TAG#v}"
   sed -i "0,/^version = /s/^version = \".*\"/version = \"${TAG#v}\"/" Cargo.toml
-  git add Cargo.toml
-  git commit -m "chore(release): bump version to ${TAG#v}"
+  git add Cargo.toml Cargo.lock
 fi
 
-if [[ "$STRIPPED_DOCS" -eq 1 ]]; then
-  git commit -m "chore(release): strip internal docs/ for github mirror"
+# One combined commit covering both the bump and the docs strip. We stage
+# before deciding to commit (so the commit message reflects both intents when
+# both apply) and skip the commit entirely if neither side changed (e.g. no
+# docs/ to strip on this repo and no --bump-cargo).
+if ! git diff --cached --quiet; then
+  if [[ "$BUMP_CARGO" -eq 1 ]]; then
+    msg="chore(release): bump version to ${TAG#v} and strip internal docs/"
+  else
+    msg="chore(release): strip internal docs/ for github mirror"
+  fi
+  git commit -m "$msg"
 fi
 
 # ---------- tag + push ----------
