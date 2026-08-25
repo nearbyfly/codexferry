@@ -11,7 +11,7 @@ codexferry is one provider (`codexferry`) backed by an internal router. `cxf.tom
 ```
 ┌─── codexferry dynamic config ────────────────────────────────┐
 │                                                              │
-│   cxf.toml edit → hot-reload → next codex turn sees new routes │
+│ cxf.toml edit → hot-reload → next codex turn sees new routes │
 │                                                              │
 └──────────────────────────────────────────────────────────────┘
 
@@ -23,11 +23,11 @@ codexferry is one provider (`codexferry`) backed by an internal router. `cxf.tom
                 ┌───────────┴───────────┐
                 ▼                       ▼
          ┌──────────────────┐   ┌──────────────────┐
-         │  responses        │   │       chat        │
-         │  upstream         │   │    upstream       │
-         │  passthrough      │   │    + heal         │
-         │  (verbatim)       │   │   Responses →    │
-         │                    │   │    Chat          │
+         │  responses       │   │       chat       │
+         │  upstream        │   │    upstream      │
+         │  passthrough     │   │    + heal        │
+         │  (verbatim)      │   │   Responses →    │
+         │                  │   │    Chat          │
          └──────────────────┘   └──────────────────┘
 
 

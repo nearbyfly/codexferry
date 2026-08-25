@@ -178,10 +178,12 @@ accurate — do not leave stale comments that describe old behavior.
 ### 11. Exactly one per-request log line via `log_request()`
 
 `handle_responses` emits one `tracing::info!` per request (route, upstream,
-model, status, input/output tokens, elapsed_ms — spec §11) using the
-`log_request()` helper. Streaming requests are logged from the spawned stream
-task (real token counts are only known at stream end); error responses are
-logged from the handler. Do not add extra per-request log lines. The documented
+model, status, input/output tokens, elapsed_ms, and for 4xx/5xx the error
+message - spec §11) using the `log_request()` helper. Streaming requests are
+logged from the spawned stream task (real token counts are only known at
+stream end); error responses are logged from the handler, with the
+`error.message` extracted from the response body via `extract_error_detail`.
+Do not add extra per-request log lines. The documented
 anomaly-only `warn!` exceptions (they fire on genuine anomalies, never on a
 healthy request): the `missing_done` quirk/truncation warns in the chat stream
 task, the streaming idle-timeout warns, and the non-2xx upstream body warn

@@ -68,9 +68,126 @@ context_window = 1000
     Router::new()
         .route("/v1/models", get(handle_models))
         .route("/models", get(handle_models))
+        .route("/v1/responses", post(handle_responses))
         .route("/healthz", get(handle_healthz))
         .fallback(handle_fallback)
         .with_state(state)
+}
+
+/// A `std::io::Write` implementation that appends to a shared buffer, used
+/// with `tracing_subscriber::fmt().with_writer()` to capture log output in
+/// tests.
+struct SharedBuf(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for SharedBuf {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Install a thread-local tracing subscriber that writes to a shared buffer;
+/// returns the buffer so the test can inspect the captured log lines.
+fn capture_logs() -> (
+    tracing::subscriber::DefaultGuard,
+    Arc<std::sync::Mutex<Vec<u8>>>,
+) {
+    let buf = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let writer_buf = buf.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || SharedBuf(writer_buf.clone()))
+        .with_max_level(tracing::Level::INFO)
+        .finish();
+    let guard = tracing::subscriber::set_default(subscriber);
+    (guard, buf)
+}
+
+#[tokio::test]
+async fn error_log_includes_detail_for_unknown_model() {
+    let app = test_router_with_routes(&["ds/a"]).await;
+    let (_guard, buf) = capture_logs();
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"model": "ds/nonexistent", "input": "hi"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+
+    let log = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    assert!(
+        log.contains("no route for model"),
+        "per-request error log must include the error detail for debugging, got: {log}"
+    );
+}
+
+#[tokio::test]
+async fn error_log_includes_detail_for_parse_error() {
+    let app = test_router_with_routes(&["ds/a"]).await;
+    let (_guard, buf) = capture_logs();
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"model": broken json"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+
+    let log = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    assert!(
+        log.contains("failed to parse request"),
+        "per-request error log must include the parse error detail, got: {log}"
+    );
+}
+
+#[tokio::test]
+async fn extract_error_detail_reads_and_reconstructs_response() {
+    let resp = error_response(
+        StatusCode::BAD_GATEWAY,
+        "upstream_error",
+        "upstream connection refused",
+    );
+    let (resp, detail) = extract_error_detail(resp).await;
+    assert_eq!(resp.status(), 502);
+    assert_eq!(
+        detail.as_deref(),
+        Some("upstream connection refused"),
+        "error detail must be extracted from the response body"
+    );
+    // The reconstructed response must still carry the original JSON body.
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let v: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["error"]["message"], "upstream connection refused");
+}
+
+#[tokio::test]
+async fn extract_error_detail_passes_success_through_untouched() {
+    let resp = (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({"result": "ok"})),
+    )
+        .into_response();
+    let (resp, detail) = extract_error_detail(resp).await;
+    assert_eq!(resp.status(), 200);
+    assert!(
+        detail.is_none(),
+        "success responses must not produce an error detail"
+    );
 }
 
 #[tokio::test]

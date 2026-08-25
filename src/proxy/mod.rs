@@ -657,7 +657,16 @@ async fn handle_responses(State(state): State<Arc<AppState>>, body: axum::body::
                 "invalid_request_error",
                 &format!("failed to parse request: {e}"),
             );
-            log_request("?", "?", "?", status.as_u16(), 0, 0, started.elapsed());
+            log_request(
+                "?",
+                "?",
+                "?",
+                status.as_u16(),
+                0,
+                0,
+                started.elapsed(),
+                Some(&format!("failed to parse request: {e}")),
+            );
             return resp;
         }
     };
@@ -685,6 +694,7 @@ async fn handle_responses(State(state): State<Arc<AppState>>, body: axum::body::
                     0,
                     0,
                     started.elapsed(),
+                    Some(&format!("no route for model: {model_key}")),
                 );
                 return resp;
             }
@@ -717,6 +727,7 @@ async fn handle_responses(State(state): State<Arc<AppState>>, body: axum::body::
                 0,
                 0,
                 started.elapsed(),
+                Some(&e),
             );
             return resp;
         }
@@ -739,6 +750,7 @@ async fn handle_responses(State(state): State<Arc<AppState>>, body: axum::body::
     // (upstream 502, non-2xx, ...), no task exists to log -- so log errors
     // here too, keeping one line per request on every path.
     if !req.stream || resp.status().is_client_error() || resp.status().is_server_error() {
+        let (resp, error_detail) = extract_error_detail(resp).await;
         log_request(
             &model_key,
             &upstream_model,
@@ -747,13 +759,39 @@ async fn handle_responses(State(state): State<Arc<AppState>>, body: axum::body::
             input_tokens,
             output_tokens,
             started.elapsed(),
+            error_detail.as_deref(),
         );
+        return resp;
     }
     resp
 }
 
+/// Read a 4xx/5xx response body (bounded to 64KB) and extract
+/// `error.message` for the per-request log line. Returns the reconstructed
+/// response alongside the extracted detail so the client still receives the
+/// original body. Non-error statuses pass through untouched without reading
+/// the body.
+async fn extract_error_detail(resp: Response) -> (Response, Option<String>) {
+    if !resp.status().is_client_error() && !resp.status().is_server_error() {
+        return (resp, None);
+    }
+    let (parts, body) = resp.into_parts();
+    let bytes = axum::body::to_bytes(body, 64 * 1024)
+        .await
+        .unwrap_or_default();
+    let detail = serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()
+        .and_then(|v| v["error"]["message"].as_str().map(String::from));
+    (
+        Response::from_parts(parts, axum::body::Body::from(bytes)),
+        detail,
+    )
+}
+
 /// Emit the single per-request log line (spec §11): route, upstream, model,
-/// status code, input/output tokens, and duration.
+/// status code, input/output tokens, duration, and (for 4xx/5xx) the error
+/// message returned to the client - the detail that makes the log line
+/// self-sufficient for debugging without re-sending the request.
 ///
 /// Uses explicit `%`-style Display field assignments (AGENTS.md #3) because the
 /// route/upstream/model values are borrowed `&str`s rather than locals that
@@ -766,6 +804,7 @@ fn log_request(
     input_tokens: u32,
     output_tokens: u32,
     elapsed: Duration,
+    error: Option<&str>,
 ) {
     tracing::info!(
         route = %route,
@@ -775,6 +814,7 @@ fn log_request(
         input_tokens = input_tokens,
         output_tokens = output_tokens,
         elapsed_ms = elapsed.as_millis() as u64,
+        error = error.unwrap_or(""),
         "request handled"
     );
 }
