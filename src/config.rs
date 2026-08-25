@@ -176,6 +176,11 @@ pub struct RouteConfig {
     /// inherited from the upstream template.
     #[serde(default)]
     pub default_reasoning_effort: Option<String>,
+    /// Optional human-readable description appended to the generated model
+    /// catalog entry's description (after "CodexFerry route {key}"),
+    /// visible in the Codex `/model` picker as the model's subtitle.
+    #[serde(default)]
+    pub description: Option<String>,
 }
 fn default_context_window() -> u64 {
     1_048_576
@@ -326,6 +331,9 @@ pub struct ValidatedRoute {
     /// `None` leaves the catalog entry without reasoning fields (see
     /// [`RouteConfig::default_reasoning_effort`]).
     pub default_reasoning_effort: Option<String>,
+    /// Optional description appended to the catalog entry's description
+    /// (see [`RouteConfig::description`]).
+    pub description: Option<String>,
 }
 
 /// Current default config filename (the file the server and subcommands load
@@ -517,6 +525,7 @@ impl Config {
                         model: route.model.clone(),
                         context_window: route.context_window,
                         default_reasoning_effort: route.default_reasoning_effort.clone(),
+                        description: route.description.clone(),
                     },
                 )
                 .is_some()

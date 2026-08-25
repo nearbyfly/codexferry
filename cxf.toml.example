@@ -57,11 +57,13 @@ max_memory_mb = 512
 disabled = []
 
 # Route field reference:
-#   model                    — upstream model name (required)
-#   context_window           — context window advertised in the generated model catalog (default 1 Mi tokens)
-#   default_reasoning_effort — catalog default level + the only level offered by the Codex picker
-#                              (minimal|low|medium|high|xhigh; optional — omit for models without a reasoning level)
+#   model                    - upstream model name (required)
+#   context_window           - context window advertised in the generated model catalog (default 1 Mi tokens)
+#   default_reasoning_effort - catalog default level + the only level offered by the Codex picker
+#                              (minimal|low|medium|high|xhigh; optional - omit for models without a reasoning level)
+#   description              - optional text appended to the catalog description shown in Codex's /model picker
+#                              (format: "CodexFerry route {key} - {description}")
 [routes]
 "deepseek/deepseek-v4-pro"   = { model = "deepseek-reasoner", context_window = 131072, default_reasoning_effort = "high" }
-"deepseek/deepseek-v4-flash" = { model = "deepseek-chat" }
+"deepseek/deepseek-v4-flash" = { model = "deepseek-chat", description = "fast, cheap - good for mechanical tasks" }
 "ark/glm-5.2"                = { model = "glm-5.2", default_reasoning_effort = "medium" }

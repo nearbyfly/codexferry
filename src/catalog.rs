@@ -76,7 +76,13 @@ pub fn build_catalog_entry(route_key: &str, context_window: u64, effort: Option<
         "base_instructions".into(),
         json!(FALLBACK_BASE_INSTRUCTIONS),
     );
-    set_catalog_fields(&mut obj, route_key, context_window, effort);
+    set_catalog_fields(
+        &mut obj,
+        route_key,
+        context_window,
+        effort,
+        /* description */ None,
+    );
     Value::Object(obj)
 }
 
@@ -127,6 +133,7 @@ pub fn build_catalog_value(
             route_key,
             route.context_window,
             route.default_reasoning_effort.as_deref(),
+            route.description.as_deref(),
         );
         models.push(Value::Object(seed));
     }
@@ -241,6 +248,7 @@ fn set_catalog_fields(
     route_key: &str,
     context_window: u64,
     default_reasoning_effort: Option<&str>,
+    description: Option<&str>,
 ) {
     // slug/display_name are the route key itself, so they always match what
     // the user passes to `codex -m`.
@@ -270,10 +278,11 @@ fn set_catalog_fields(
     // 2026-08-17 DSML leak was exactly this class of inheritance).
     obj.insert("shell_type".into(), json!("default"));
     obj.insert("supports_parallel_tool_calls".into(), json!(true));
-    obj.insert(
-        "description".into(),
-        json!(format!("Router route {route_key}")),
-    );
+    let description_value = match description {
+        Some(desc) => format!("CodexFerry route {route_key} - {desc}"),
+        None => format!("CodexFerry route {route_key}"),
+    };
+    obj.insert("description".into(), json!(description_value));
     // Required-by-Codex structural fields. Codex >= 0.147 deserializes the
     // catalog into a strict struct whose `priority`, `support_verbosity`,
     // `truncation_policy` and `experimental_supported_tools` have NO serde
@@ -713,10 +722,50 @@ format = "chat"
 "x/model-a" = { model = "a", context_window = 131072 }
 "#;
 
+    const ROUTE_CONFIG_WITH_DESC: &str = r#"
+[providers.x]
+base_url = "https://x.com/v1"
+api_key = "k"
+format = "chat"
+[routes]
+"x/model-a" = { model = "a", context_window = 131072, description = "fast coding model" }
+"#;
+
     fn gen_with(dir: &std::path::Path, template: Option<&std::path::Path>) -> GeneratedCatalog {
         let config_path = dir.join("config.toml");
         std::fs::write(&config_path, ROUTE_CONFIG).unwrap();
         generate_catalog(&config_path, template).unwrap()
+    }
+
+    fn gen_with_desc(
+        dir: &std::path::Path,
+        template: Option<&std::path::Path>,
+    ) -> GeneratedCatalog {
+        let config_path = dir.join("config.toml");
+        std::fs::write(&config_path, ROUTE_CONFIG_WITH_DESC).unwrap();
+        generate_catalog(&config_path, template).unwrap()
+    }
+
+    #[test]
+    fn description_fallback_uses_codexferry_route() {
+        let dir = tempfile::tempdir().unwrap();
+        let generated = gen_with(dir.path(), None);
+        let entry = &generated.catalog["models"][0];
+        assert_eq!(
+            entry["description"], "CodexFerry route x/model-a",
+            "fallback description must use the CodexFerry brand"
+        );
+    }
+
+    #[test]
+    fn configurable_description_appends_after_route_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let generated = gen_with_desc(dir.path(), None);
+        let entry = &generated.catalog["models"][0];
+        assert_eq!(
+            entry["description"], "CodexFerry route x/model-a - fast coding model",
+            "custom description must be appended after the route key with a dash separator"
+        );
     }
 
     #[test]
@@ -781,7 +830,7 @@ format = "chat"
         assert_eq!(entry["shell_type"], "default");
         assert_eq!(entry["supports_parallel_tool_calls"], true);
         assert_eq!(entry["prefer_websockets"], false);
-        assert_eq!(entry["description"], "Router route x/model-a");
+        assert_eq!(entry["description"], "CodexFerry route x/model-a");
         assert_eq!(entry["slug"], "x/model-a");
         assert_eq!(entry["context_window"], 131072);
         // Required-by-codex structural fields are pinned to neutral values
