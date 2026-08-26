@@ -58,6 +58,7 @@ upstream serves it.
 |-------|---------|-------------|
 | `host` | `127.0.0.1` | Bind address |
 | `port` | `8787` | Bind port |
+| `hide_bundled_models` | `false` | Emit `visibility:"hide"` overrides for Codex's bundled models on the live `/models` catalog (dynamic mode only; `gen-catalog` never affected). Requires the `codex` binary on the proxy's `PATH`; if discovery fails, hiding is silently disabled and a warning is logged. |
 
 #### `[providers.<name>]`
 

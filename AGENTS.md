@@ -208,6 +208,10 @@ Codex CLI sends `client_version` unconditionally; no OpenAI-compatible list
 client sends it. Catalog building logic lives exclusively in
 `catalog.rs::build_catalog_value`. Both branches emit `ETag` headers and
 support `If-None-Match` → `304 Not Modified`.
+- When `[server] hide_bundled_models = true`, the catalog-shape branch also
+  appends `visibility: "hide"` overrides cloned from `codex debug models
+  --bundled` so Codex's dynamic-mode slug merge hides its bundled GPT models;
+  see `docs/superpowers/specs/2026-08-26-hide-bundled-models-design.md`.
 
 ### 13. Keep the three top-level MD docs in sync
 

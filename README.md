@@ -85,6 +85,24 @@ Full field reference and every config knob live in [README-DETAILS.md](./README-
 
 Both modes use the same `cxf.toml`. The difference is only the Codex side — see `scripts/codex-config-dynamic.toml.example` and `scripts/codex-config-static.toml.example`.
 
+### Hiding Codex's bundled GPT models (dynamic mode)
+
+In dynamic mode Codex merges its own bundled model catalog (the GPT family
+compiled into the codex binary) underneath the models this proxy serves, so
+those entries show up in the picker. Setting
+
+```toml
+[server]
+hide_bundled_models = true
+```
+
+makes the live `/models` catalog additionally return `visibility: "hide"`
+copies of every bundled model (discovered via `codex debug models
+--bundled`), which suppresses them from the picker while your routes stay
+selectable. If the `codex` binary is not on the proxy's `PATH`, hiding is
+silently disabled and the bundled models reappear — check the daemon log
+for the warning. `gen-catalog` output is never affected.
+
 ## Use
 
 ```bash
