@@ -124,6 +124,8 @@ git commit -m "feat(config): add [server].hide_bundled_models flag"
 
 ### Task 2: Bundled-catalog discovery in `catalog.rs`
 
+**Execution note:** As built, `bundled_from_command` delegates to `bundled_from_command_with_timeout` (10s bound, commit `907ae3e`) which drains stdout on a reader thread to avoid a pipe-buffer deadlock with real codex output (commit `348b5df`). Do not revert to a plain `.output()`-based implementation without those two guards.
+
 **Files:**
 - Modify: `src/catalog.rs` (new functions after `reload_template`, ~line 454)
 - Test: `src/catalog.rs` (append to the existing `#[cfg(test)] mod tests`)
