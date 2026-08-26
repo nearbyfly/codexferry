@@ -44,6 +44,10 @@ struct Cached {
     /// When this entry was last built; drives periodic re-discovery when
     /// `template_path` is `None`.
     checked_at: Instant,
+    /// Whether hide entries were appended at build time — drives the
+    /// periodic re-probe even when the template is file-backed (the
+    /// bundled catalog comes from a shell-out with no mtime).
+    hide_bundled: bool,
 }
 
 /// Cache for the live `/models` catalog endpoint.
@@ -54,6 +58,9 @@ struct Cached {
 /// because the installed Codex template is temporarily unreadable).
 pub struct CatalogCache {
     inner: Mutex<Option<Cached>>,
+    /// Bundled-catalog discovery, injectable so unit tests never depend on
+    /// the host's real codex binary (hide-bundled spec §Freshness).
+    discovery: fn() -> Vec<serde_json::Value>,
 }
 
 impl CatalogCache {
@@ -61,6 +68,7 @@ impl CatalogCache {
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(None),
+            discovery: crate::catalog::discover_bundled_models,
         }
     }
 
@@ -76,14 +84,14 @@ impl CatalogCache {
         // Fast path: reuse the cached body when neither the routes nor the
         // template file changed. The template_path from the previous call is
         // also what we stat; if the template was served by `codex debug
-        // models` (no file), mtime is always None and only the fingerprint
-        // keeps the cache fresh.
+        // models` (no file), mtime is always None. Freshness is kept by the
+        // re-probe cadence below (recheck_due) plus the fingerprint.
         let cached_hit = {
             let inner = self.inner.lock().unwrap();
             inner.as_ref().and_then(|cached| {
                 let template_mtime = cached.template_path.as_ref().and_then(file_mtime);
-                let recheck_due = cached.template_path.is_none()
-                    && cached.checked_at.elapsed() >= TEMPLATE_RECHECK_INTERVAL;
+                let recheck_due = cached.checked_at.elapsed() >= TEMPLATE_RECHECK_INTERVAL
+                    && (cached.template_path.is_none() || cached.hide_bundled);
                 if cached.fingerprint == fingerprint
                     && cached.template_mtime == template_mtime
                     && !recheck_due
@@ -102,7 +110,25 @@ impl CatalogCache {
         // rebuild the catalog, and store the result.
         let (template_path, template) = crate::catalog::reload_template();
         let template_mtime = template_path.as_ref().and_then(file_mtime);
-        let generated = crate::catalog::build_catalog_value(config, template.as_ref());
+        let mut generated = crate::catalog::build_catalog_value(config, template.as_ref());
+        // Hide overrides: dynamic-mode only, opt-in. gen-catalog never runs
+        // this code (spec §Decisions 1-2).
+        let hide_bundled = config.server.hide_bundled_models;
+        if hide_bundled {
+            let bundled = (self.discovery)();
+            if bundled.is_empty() {
+                tracing::warn!(
+                    "hide_bundled_models is on but `codex debug models --bundled` returned no models; Codex's bundled models stay visible"
+                );
+            } else {
+                let route_keys: std::collections::HashSet<&str> =
+                    config.routes.keys().map(String::as_str).collect();
+                let entries = crate::catalog::build_hide_entries(&bundled, &route_keys);
+                if let Some(models) = generated.catalog["models"].as_array_mut() {
+                    models.extend(entries);
+                }
+            }
+        }
         let body = serde_json::to_vec(&generated.catalog)
             .map(Bytes::from)
             .unwrap_or_default();
@@ -114,6 +140,7 @@ impl CatalogCache {
             template_path,
             template_mtime,
             checked_at: Instant::now(),
+            hide_bundled,
         };
         *self.inner.lock().unwrap() = Some(cached);
         (etag, body)
@@ -128,10 +155,14 @@ impl Default for CatalogCache {
 
 /// Hash the routes in sorted key order into a fingerprint.
 ///
-/// Only the fields that affect the generated catalog are fed in: key,
-/// context window, and default reasoning effort (empty string when unset).
+/// Only the fields that affect the served catalog body are fed in: key,
+/// context window, default reasoning effort (empty string when unset), and
+/// the `hide_bundled_models` flag.
 fn fingerprint_config(config: &ValidatedConfig) -> u64 {
     let mut h = DefaultHasher::new();
+    // The hide flag changes the served body; hashing it (re)builds the
+    // cache when a hot-reload toggles it (spec §Freshness).
+    h.write_u8(u8::from(config.server.hide_bundled_models));
     let mut keys: Vec<&String> = config.routes.keys().collect();
     keys.sort();
     for key in keys {
@@ -161,6 +192,7 @@ fn etag_for(fingerprint: u64, body: &[u8]) -> String {
 mod tests {
     use super::*;
     use crate::config::{Config, ValidatedConfig};
+    use serde_json::Value;
     use std::sync::Arc;
     use tokio::sync::RwLock;
 
@@ -242,5 +274,120 @@ context_window = 1000
             inner.as_ref().unwrap().checked_at
         };
         assert!(rebuilt_checked_at > fresh_checked_at);
+    }
+    fn config_with_flag(key: &str, hide: bool) -> ValidatedConfig {
+        let toml = format!(
+            r#"
+[server]
+hide_bundled_models = {hide}
+[providers.ds]
+base_url = "http://x"
+api_key = "k"
+format = "chat"
+[routes."{key}"]
+model = "m"
+context_window = 1000
+"#
+        );
+        parse_config_toml(&toml)
+    }
+
+    fn marker_discovery() -> Vec<Value> {
+        vec![serde_json::json!({"slug": "gpt-marker", "visibility": "list"})]
+    }
+
+    #[tokio::test]
+    async fn hide_flag_off_serves_no_hide_entries_and_never_discovers() {
+        static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        fn counting() -> Vec<Value> {
+            CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            marker_discovery()
+        }
+        let cfg = Arc::new(RwLock::new(config_with_flag("ds/a", false)));
+        let cache = CatalogCache {
+            inner: Mutex::new(None),
+            discovery: counting,
+        };
+        let (_, body) = cache.get(&cfg.read().await);
+        assert!(
+            !body.windows(10).any(|w| w == b"gpt-marker"),
+            "flag off must not append hide entries"
+        );
+        assert_eq!(
+            CALLS.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "discovery must not run when the flag is off"
+        );
+    }
+
+    #[tokio::test]
+    async fn hide_flag_on_appends_hide_entries() {
+        let cfg = Arc::new(RwLock::new(config_with_flag("ds/a", true)));
+        let cache = CatalogCache {
+            inner: Mutex::new(None),
+            discovery: marker_discovery,
+        };
+        let (etag, body) = cache.get(&cfg.read().await);
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        let models = v["models"].as_array().expect("models array");
+        let marker = models
+            .iter()
+            .find(|m| m["slug"] == "gpt-marker")
+            .expect("hide entry appended");
+        assert_eq!(marker["visibility"], "hide");
+        assert!(
+            models
+                .iter()
+                .any(|m| m["slug"] == "ds/a" && m["visibility"] == "list"),
+            "route entries stay list-visible"
+        );
+        assert!(!etag.is_empty());
+    }
+
+    #[tokio::test]
+    async fn hide_flag_toggle_invalidates_cache() {
+        let cfg = Arc::new(RwLock::new(config_with_flag("ds/a", false)));
+        let cache = CatalogCache {
+            inner: Mutex::new(None),
+            discovery: marker_discovery,
+        };
+        let (etag1, body1) = cache.get(&cfg.read().await);
+        *cfg.write().await = config_with_flag("ds/a", true);
+        let (etag2, body2) = cache.get(&cfg.read().await);
+        assert_ne!(etag1, etag2, "flag toggle must invalidate the cache");
+        assert!(!body1.windows(10).any(|w| w == b"gpt-marker"));
+        assert!(body2.windows(10).any(|w| w == b"gpt-marker"));
+    }
+
+    #[tokio::test]
+    async fn hide_with_file_template_reprobes_after_interval() {
+        // Hide entries come from a shell-out source with no mtime, so the
+        // 60s re-probe must fire even when the template is file-backed
+        // (spec §Freshness).
+        static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        fn counting() -> Vec<Value> {
+            CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            marker_discovery()
+        }
+        let cfg = Arc::new(RwLock::new(config_with_flag("ds/a", true)));
+        let cache = CatalogCache {
+            inner: Mutex::new(None),
+            discovery: counting,
+        };
+        let _ = cache.get(&cfg.read().await);
+        {
+            let mut inner = cache.inner.lock().unwrap();
+            let cached = inner.as_mut().unwrap();
+            // Simulate a file-backed template + an aged entry.
+            cached.template_path = Some(PathBuf::from("/nonexistent-template.json"));
+            cached.checked_at =
+                std::time::Instant::now() - (TEMPLATE_RECHECK_INTERVAL + Duration::from_secs(1));
+        }
+        let _ = cache.get(&cfg.read().await);
+        assert_eq!(
+            CALLS.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "aged entry with hide on must rebuild despite a file-backed template"
+        );
     }
 }
