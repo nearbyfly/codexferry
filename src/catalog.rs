@@ -453,6 +453,43 @@ pub(crate) fn reload_template() -> (Option<std::path::PathBuf>, Option<Value>) {
     }
 }
 
+/// Discover the installed Codex CLI's bundled model catalog by shelling out
+/// to `codex debug models --bundled` (hide-bundled spec §Decisions 3: the
+/// ONLY source for hide overrides — `load_template`'s file fallbacks may be
+/// user-managed and are not guaranteed to equal the binary's bundled list).
+/// Any failure (no codex on PATH, non-zero exit, unparseable output)
+/// degrades to an empty vec: hiding is best-effort and never breaks the
+/// catalog (spec §Decisions 4).
+pub(crate) fn discover_bundled_models() -> Vec<Value> {
+    bundled_from_command("codex")
+}
+
+/// Shell out to `cmd debug models --bundled` and return its `models` array.
+/// Split from [`discover_bundled_models`] so unit tests can point at a fake
+/// binary without mutating process-global `PATH` (which races parallel
+/// tests — spec §Freshness).
+fn bundled_from_command(cmd: &str) -> Vec<Value> {
+    let Ok(output) = std::process::Command::new(cmd)
+        .args(["debug", "models", "--bundled"])
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    parse_bundled_output(&output.stdout)
+}
+
+/// Parse the `{"models": [...]}` stdout of `codex debug models --bundled`.
+/// Anything that is not that shape degrades to an empty vec.
+fn parse_bundled_output(stdout: &[u8]) -> Vec<Value> {
+    serde_json::from_slice::<Value>(stdout)
+        .ok()
+        .and_then(|v| v.get("models").and_then(Value::as_array).cloned())
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -906,5 +943,41 @@ format = "chat"
         let b = generate_catalog(&path, Some(&template_path)).unwrap();
         assert_eq!(a.catalog, b.catalog);
         assert!(a.dropped_template_fields.is_empty());
+    }
+
+    #[test]
+    fn parse_bundled_output_extracts_models_array() {
+        let out = br#"{"models": [{"slug": "gpt-x", "visibility": "list"}]}"#;
+        let models = parse_bundled_output(out);
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0]["slug"], "gpt-x");
+    }
+
+    #[test]
+    fn parse_bundled_output_degrades_on_garbage() {
+        assert!(parse_bundled_output(b"not json").is_empty());
+        assert!(parse_bundled_output(br#"{"no_models": []}"#).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bundled_from_command_runs_the_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-codex");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\necho '{\"models\": [{\"slug\": \"gpt-x\", \"visibility\": \"list\"}]}'",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let models = bundled_from_command(script.to_str().unwrap());
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0]["slug"], "gpt-x");
+    }
+
+    #[test]
+    fn bundled_from_command_missing_binary_is_empty() {
+        assert!(bundled_from_command("/nonexistent/codexferry-no-such-bin").is_empty());
     }
 }
