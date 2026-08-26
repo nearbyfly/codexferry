@@ -456,8 +456,9 @@ pub(crate) fn reload_template() -> (Option<std::path::PathBuf>, Option<Value>) {
 
 /// Bound on a single `codex debug models --bundled` discovery run. A hung
 /// `codex` must not wedge the `/models` request path or the config
-/// hot-reload writer indefinitely (Task 4 review; output is small, so a
-/// post-exit read cannot deadlock on the pipe buffer).
+/// hot-reload writer indefinitely (Task 4 review; stdout is drained on a
+/// reader thread while waiting, so a large catalog cannot deadlock on the
+/// pipe buffer).
 const BUNDLED_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Discover the installed Codex CLI's bundled model catalog by shelling out
@@ -484,7 +485,6 @@ fn bundled_from_command(cmd: &str) -> Vec<Value> {
 /// Split out so the timeout path is testable without waiting out the real
 /// 10s constant.
 fn bundled_from_command_with_timeout(cmd: &str, timeout: Duration) -> Vec<Value> {
-    use std::io::Read;
     let Ok(mut child) = std::process::Command::new(cmd)
         .args(["debug", "models", "--bundled"])
         .stdout(std::process::Stdio::piped())
@@ -493,6 +493,19 @@ fn bundled_from_command_with_timeout(cmd: &str, timeout: Duration) -> Vec<Value>
     else {
         return Vec::new();
     };
+    // Read stdout on a separate thread so a large catalog (real codex emits
+    // ~315 KB, far beyond the 64 KB pipe buffer) cannot deadlock the child on
+    // write(2) while we only poll try_wait (same approach Command::output()
+    // uses internally).
+    let stdout_pipe = child.stdout.take();
+    let reader = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        if let Some(mut out) = stdout_pipe {
+            let _ = out.read_to_end(&mut buf);
+        }
+        buf
+    });
     let deadline = std::time::Instant::now() + timeout;
     let status = loop {
         if let Some(status) = child.try_wait().ok().flatten() {
@@ -505,10 +518,7 @@ fn bundled_from_command_with_timeout(cmd: &str, timeout: Duration) -> Vec<Value>
         }
         std::thread::sleep(Duration::from_millis(20));
     };
-    let mut stdout = Vec::new();
-    if let Some(mut out) = child.stdout.take() {
-        let _ = out.read_to_end(&mut stdout);
-    }
+    let stdout = reader.join().unwrap_or_default();
     if !status.success() {
         return Vec::new();
     }
@@ -1142,6 +1152,40 @@ format = "chat"
         assert!(
             start.elapsed() < std::time::Duration::from_secs(5),
             "timeout must bound the wait"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bundled_from_command_handles_large_output() {
+        // Real `codex debug models --bundled` emits ~315 KB — far beyond the
+        // 64 KB pipe buffer. A read-after-exit implementation deadlocks the
+        // child on write(2) and hits the timeout; this regression feeds a
+        // catalog bigger than the pipe buffer and expects it parsed fully.
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("big-codex");
+        let mut models = String::from(r#"{"models":["#);
+        for i in 0..4000 {
+            if i > 0 {
+                models.push(',');
+            }
+            models.push_str(&format!(r#"{{"slug":"gpt-{i}","visibility":"list"}}"#));
+        }
+        models.push_str("]}");
+        // ~4000 entries x ~40 bytes ≈ 160 KB > 64 KB pipe buffer.
+        let body = format!("#!/bin/sh\ncat <<'EOF'\n{models}\nEOF\n");
+        std::fs::write(&script, body).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let start = std::time::Instant::now();
+        // Use the retry seam so a transient ETXTBSY on exec cannot flake the
+        // test (a genuinely broken script still yields empty every attempt).
+        let parsed = bundled_from_command_retry(script.to_str().unwrap());
+        assert_eq!(parsed.len(), 4000, "large catalog must be parsed fully");
+        assert_eq!(parsed[3999]["slug"], "gpt-3999");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "large output must not hit the 10s timeout"
         );
     }
 }
