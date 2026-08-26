@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # E2E: real Codex CLI against codexferry over the scripted e2e-mock upstream.
-# Usage: scripts/e2e.sh [basic|models|static|tools|multiturn|cross_format_switch|stale_catalog|doctor_dynamic|doctor_pinned|doctor_fallback|all]   (default: all)
+# Usage: scripts/e2e.sh [basic|models|static|tools|multiturn|cross_format_switch|stale_catalog|doctor_dynamic|doctor_pinned|doctor_fallback|hide_bundled|all]   (default: all)
 # Requires: codex CLI on PATH, python3, curl. Never touches ~/.codex or the
 # resident router's config — the CLI's CODEX_HOME is redirected to the
 # artifact dir. Markers that also appear in the user-prompt echo are asserted
@@ -88,6 +88,59 @@ scenario_models() {
   assert_live_catalog_fetched mocka/chat mockb/chat mockr/resp
   cleanup_procs
   pass "models"
+}
+
+scenario_hide_bundled() {
+  log "scenario: hide_bundled_models (codex-side merge probe)"
+  start_mock basic "$ARTIFACT_DIR/record-hide.jsonl"   # /models is router-served; mock unused
+
+  # Phase A (control, flag off): the merged catalog codex builds must still
+  # show >=1 bundled model as picker-visible - proves the fetch+merge
+  # happened, so phase B's hiding is the flag's doing, not a broken fetch.
+  # start_router clears $CODEX_HOME/models_cache.json (300s TTL) per start,
+  # so the two phases cannot read each other's cache. The non-route
+  # list-visible slugs are ALSO written to a file for phase B's before/after
+  # comparison (version-independent: no gpt slug is hardcoded).
+  write_router_config "$ARTIFACT_DIR/config-hide-off.toml" "$(free_port)" "$MOCK_PORT"
+  start_router "$ARTIFACT_DIR/config-hide-off.toml"
+  run_codex_debug_models > "$ARTIFACT_DIR/merged-hide-off.json"
+  python3 - "$ARTIFACT_DIR/merged-hide-off.json" "$ARTIFACT_DIR/visible-nonroute-a.txt" <<'PY' || fail "control (flag off): no bundled model picker-visible - fetch/merge broken?"
+import json, sys
+models = json.load(open(sys.argv[1])).get("models", [])
+routes = {"mocka/chat", "mockb/chat", "mockr/resp"}
+visible = [m.get("slug") for m in models if m.get("visibility") == "list"]
+nonroute = [s for s in visible if s not in routes]
+assert nonroute, f"expected >=1 bundled list-visible model, got {visible}"
+with open(sys.argv[2], "w") as f:
+    f.write("\n".join(nonroute) + "\n")
+PY
+  cleanup_procs
+
+  # Phase B (flag on): every picker-visible model must be a router route,
+  # and every bundled slug that was picker-visible in phase A must no longer
+  # be list-visible - direct proof the visibility:"hide" overrides merged
+  # inside codex itself. The before/after comparison is the strongest
+  # version-independent assertion: it cannot be satisfied vacuously by
+  # codex's own pre-hidden entries.
+  start_mock basic "$ARTIFACT_DIR/record-hide.jsonl"   # fresh mock: phase A's cleanup killed it
+  write_router_config "$ARTIFACT_DIR/config-hide-on.toml" "$(free_port)" "$MOCK_PORT" "hide_bundled_models = true"
+  start_router "$ARTIFACT_DIR/config-hide-on.toml"
+  run_codex_debug_models > "$ARTIFACT_DIR/merged-hide-on.json"
+  python3 - "$ARTIFACT_DIR/merged-hide-on.json" "$ARTIFACT_DIR/visible-nonroute-a.txt" mocka/chat mockb/chat mockr/resp <<'PY' || fail "hide (flag on): assertions above failed"
+import json, sys
+models = json.load(open(sys.argv[1])).get("models", [])
+routes = set(sys.argv[3:])
+visible = [m.get("slug") for m in models if m.get("visibility") == "list"]
+nonroute = [s for s in visible if s not in routes]
+assert not nonroute, f"bundled models still picker-visible: {nonroute}"
+missing = [r for r in routes if r not in visible]
+assert not missing, f"routes missing or not list-visible: {missing}"
+a_slugs = [s for s in open(sys.argv[2]).read().splitlines() if s]
+still_visible = [s for s in a_slugs if s in visible]
+assert not still_visible, f"bundled models still picker-visible after hide: {still_visible}"
+PY
+  cleanup_procs
+  pass "hide_bundled"
 }
 
 # Static-mode counterpart to `models`: codex is wired with env_key and a
@@ -424,8 +477,8 @@ command -v curl >/dev/null || fail "curl required"
 
 want="${1:-all}"
 case "$want" in
-  basic|models|static|tools|multiturn|cross_format_switch|stale_catalog|doctor_dynamic|doctor_pinned|doctor_fallback|all) ;;
-  *) fail "unknown scenario: $want (basic|models|static|tools|multiturn|cross_format_switch|stale_catalog|doctor_dynamic|doctor_pinned|doctor_fallback|all)" ;;
+  basic|models|static|tools|multiturn|cross_format_switch|stale_catalog|doctor_dynamic|doctor_pinned|doctor_fallback|hide_bundled|all) ;;
+  *) fail "unknown scenario: $want (basic|models|static|tools|multiturn|cross_format_switch|stale_catalog|doctor_dynamic|doctor_pinned|doctor_fallback|hide_bundled|all)" ;;
 esac
 case "$want" in
   basic) scenario_basic ;;
@@ -438,6 +491,7 @@ case "$want" in
   doctor_dynamic) scenario_doctor_dynamic ;;
   doctor_pinned) scenario_doctor_pinned ;;
   doctor_fallback) scenario_doctor_fallback ;;
-  all) scenario_basic; scenario_models; scenario_static; scenario_tools; scenario_multiturn; scenario_cross_format_switch; scenario_stale_catalog; scenario_doctor_dynamic; scenario_doctor_pinned; scenario_doctor_fallback ;;
+  hide_bundled) scenario_hide_bundled ;;
+  all) scenario_basic; scenario_models; scenario_static; scenario_tools; scenario_multiturn; scenario_cross_format_switch; scenario_stale_catalog; scenario_doctor_dynamic; scenario_doctor_pinned; scenario_doctor_fallback; scenario_hide_bundled ;;
 esac
 log "all requested scenarios passed"

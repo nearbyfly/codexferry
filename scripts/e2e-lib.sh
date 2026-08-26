@@ -28,12 +28,15 @@ wait_healthz() { # $1 = base url
 }
 
 # Temp router config: three routes over one mock instance. mocka/mockb are
-# distinct providers so a mid-session switch stays cross-provider.
-write_router_config() { # $1 path, $2 router port, $3 mock port
+# distinct providers so a mid-session switch stays cross-provider. $4 is an
+# optional extra [server] line (e.g. "hide_bundled_models = true" for the
+# hide_bundled scenario); empty renders a harmless blank line.
+write_router_config() { # $1 path, $2 router port, $3 mock port, $4 optional extra [server] line
   cat > "$1" <<EOF
 [server]
 host = "127.0.0.1"
 port = $2
+${4:-}
 
 [providers.mocka]
 base_url = "http://127.0.0.1:$3/v1"
@@ -239,6 +242,25 @@ run_codex_resume_fallback() { # args…: -m <route> "<prompt>"
     -c 'model_providers.e2e.wire_api="responses"' \
     -c 'model_providers.e2e.env_key="E2E_DUMMY_KEY"' \
     "$@" >"$ARTIFACT_DIR/codex-resume-$(date +%s%N).log" 2>&1
+}
+
+# `codex debug models` under the canonical dynamic wiring (auth command, no
+# pin): prints the MERGED catalog codex would use — bundled base + the
+# router's /v1/models overlay applied by apply_remote_models. This is the
+# observation point for hide_bundled_models: the merged JSON shows whether
+# the router's visibility:"hide" overrides actually suppressed the bundled
+# models INSIDE codex (the cargo integration test can only see the wire).
+# No sandbox flags: no session is started. Stderr goes to a log so the
+# caller can capture stdout as the catalog JSON.
+run_codex_debug_models() {
+  mkdir -p "$ARTIFACT_DIR/codex-home"
+  CODEX_HOME="$ARTIFACT_DIR/codex-home" codex debug models \
+    -c 'model_provider="e2e"' \
+    -c 'model_providers.e2e.name="e2e"' \
+    -c "model_providers.e2e.base_url=\"http://127.0.0.1:${ROUTER_PORT}/v1\"" \
+    -c 'model_providers.e2e.wire_api="responses"' \
+    -c 'model_providers.e2e.auth={command="echo",args=["dummy"]}' \
+    2>"$ARTIFACT_DIR/codex-debug-models-$(date +%s%N).log"
 }
 
 # Assert that codex actually FETCHED the live catalog: the models cache file
