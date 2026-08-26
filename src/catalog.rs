@@ -499,10 +499,11 @@ fn parse_bundled_output(stdout: &[u8]) -> Vec<Value> {
 /// `"list"`, so the clone suppresses the picker entry while preserving every
 /// other field — the clone round-trips codex's own serialization, so all
 /// fields required by codex's strict `ModelInfo` deserialization stay
-/// present. Entries already hidden need no override, and slugs that collide
-/// with a configured route key are skipped — the route must stay
-/// selectable. Output is sorted by slug so the response body is
-/// byte-reproducible across rebuilds.
+/// present. Slug-less entries are dropped (codex replaces by slug, so a
+/// slug-less clone is dead weight). Entries already hidden need no override,
+/// and slugs that collide with a configured route key are skipped — the
+/// route must stay selectable. Output is sorted by slug so the response body
+/// is byte-reproducible across rebuilds.
 pub(crate) fn build_hide_entries(
     bundled: &[Value],
     route_keys: &std::collections::HashSet<&str>,
@@ -517,6 +518,7 @@ pub(crate) fn build_hide_entries(
         })
         .map(|m| {
             let mut entry = m.clone();
+            // Filters above guarantee this is an object (visibility is a string).
             if let Some(obj) = entry.as_object_mut() {
                 obj.insert("visibility".into(), json!("hide"));
             }
@@ -1079,8 +1081,7 @@ format = "chat"
             json!({"slug": "alpha", "visibility": "list"}),
             json!({"slug": "ds/claim", "visibility": "list"}),
         ];
-        let route_keys: std::collections::HashSet<&str> =
-            ["ds/claim"].into_iter().collect();
+        let route_keys: std::collections::HashSet<&str> = ["ds/claim"].into_iter().collect();
         let entries = build_hide_entries(&bundled, &route_keys);
         let slugs: Vec<&str> = entries.iter().filter_map(|m| m["slug"].as_str()).collect();
         assert_eq!(
