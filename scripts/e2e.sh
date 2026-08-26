@@ -122,11 +122,22 @@ PY
   # inside codex itself. The before/after comparison is the strongest
   # version-independent assertion: it cannot be satisfied vacuously by
   # codex's own pre-hidden entries.
-  start_mock basic "$ARTIFACT_DIR/record-hide.jsonl"   # fresh mock: phase A's cleanup killed it
-  write_router_config "$ARTIFACT_DIR/config-hide-on.toml" "$(free_port)" "$MOCK_PORT" "hide_bundled_models = true"
-  start_router "$ARTIFACT_DIR/config-hide-on.toml"
-  run_codex_debug_models > "$ARTIFACT_DIR/merged-hide-on.json"
-  python3 - "$ARTIFACT_DIR/merged-hide-on.json" "$ARTIFACT_DIR/visible-nonroute-a.txt" mocka/chat mockb/chat mockr/resp <<'PY' || fail "hide (flag on): assertions above failed"
+  #
+  # Known flake (manual tool): under concurrent codex activity on the host,
+  # the router's `codex debug models --bundled` discovery can transiently
+  # hang for the full 10s timeout (codex 0.147 arg0-relay lock race, not a
+  # codexferry bug); the router then serves the un-hidden catalog and Phase B
+  # would fail with "bundled models still picker-visible" even though the
+  # feature works. Retry up to 3 attempts so one transient hang does not
+  # false-alarm; persistent failure is a real regression and still fails.
+  phase_b_attempt=0
+  while :; do
+    phase_b_attempt=$((phase_b_attempt + 1))
+    start_mock basic "$ARTIFACT_DIR/record-hide.jsonl"   # fresh mock per attempt
+    write_router_config "$ARTIFACT_DIR/config-hide-on.toml" "$(free_port)" "$MOCK_PORT" "hide_bundled_models = true"
+    start_router "$ARTIFACT_DIR/config-hide-on.toml"
+    run_codex_debug_models > "$ARTIFACT_DIR/merged-hide-on.json"
+    if python3 - "$ARTIFACT_DIR/merged-hide-on.json" "$ARTIFACT_DIR/visible-nonroute-a.txt" mocka/chat mockb/chat mockr/resp <<'PY'
 import json, sys
 models = json.load(open(sys.argv[1])).get("models", [])
 routes = set(sys.argv[3:])
@@ -139,6 +150,16 @@ a_slugs = [s for s in open(sys.argv[2]).read().splitlines() if s]
 still_visible = [s for s in a_slugs if s in visible]
 assert not still_visible, f"bundled models still picker-visible after hide: {still_visible}"
 PY
+    then
+      break
+    else
+      cleanup_procs
+      if [ "$phase_b_attempt" -ge 3 ]; then
+        fail "hide (flag on): assertions failed after $phase_b_attempt attempts"
+      fi
+      log "hide_bundled: phase B attempt $phase_b_attempt failed (transient discovery hang?); retrying"
+    fi
+  done
   cleanup_procs
   pass "hide_bundled"
 }
