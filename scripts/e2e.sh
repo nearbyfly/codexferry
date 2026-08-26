@@ -104,10 +104,10 @@ scenario_hide_bundled() {
   write_router_config "$ARTIFACT_DIR/config-hide-off.toml" "$(free_port)" "$MOCK_PORT"
   start_router "$ARTIFACT_DIR/config-hide-off.toml"
   run_codex_debug_models > "$ARTIFACT_DIR/merged-hide-off.json"
-  python3 - "$ARTIFACT_DIR/merged-hide-off.json" "$ARTIFACT_DIR/visible-nonroute-a.txt" <<'PY' || fail "control (flag off): no bundled model picker-visible - fetch/merge broken?"
+  python3 - "$ARTIFACT_DIR/merged-hide-off.json" "$ARTIFACT_DIR/visible-nonroute-a.txt" mocka/chat mockb/chat mockr/resp <<'PY' || fail "control (flag off): no bundled model picker-visible - fetch/merge broken?"
 import json, sys
 models = json.load(open(sys.argv[1])).get("models", [])
-routes = {"mocka/chat", "mockb/chat", "mockr/resp"}
+routes = set(sys.argv[3:])
 visible = [m.get("slug") for m in models if m.get("visibility") == "list"]
 nonroute = [s for s in visible if s not in routes]
 assert nonroute, f"expected >=1 bundled list-visible model, got {visible}"
@@ -130,7 +130,7 @@ PY
   # would fail with "bundled models still picker-visible" even though the
   # feature works. Retry up to 3 attempts so one transient hang does not
   # false-alarm; persistent failure is a real regression and still fails.
-  phase_b_attempt=0
+  local phase_b_attempt=0
   while :; do
     phase_b_attempt=$((phase_b_attempt + 1))
     start_mock basic "$ARTIFACT_DIR/record-hide.jsonl"   # fresh mock per attempt
@@ -142,10 +142,12 @@ import json, sys
 models = json.load(open(sys.argv[1])).get("models", [])
 routes = set(sys.argv[3:])
 visible = [m.get("slug") for m in models if m.get("visibility") == "list"]
+missing = [r for r in routes if r not in visible]
+if missing:
+    print(f"routes missing or not list-visible: {missing}", file=sys.stderr)
+    sys.exit(2)
 nonroute = [s for s in visible if s not in routes]
 assert not nonroute, f"bundled models still picker-visible: {nonroute}"
-missing = [r for r in routes if r not in visible]
-assert not missing, f"routes missing or not list-visible: {missing}"
 a_slugs = [s for s in open(sys.argv[2]).read().splitlines() if s]
 still_visible = [s for s in a_slugs if s in visible]
 assert not still_visible, f"bundled models still picker-visible after hide: {still_visible}"
@@ -153,7 +155,11 @@ PY
     then
       break
     else
+      rc=$?
       cleanup_procs
+      if [ "$rc" -eq 2 ]; then
+        fail "hide (flag on): routes missing or not list-visible (genuine regression, not a transient discovery hang)"
+      fi
       if [ "$phase_b_attempt" -ge 3 ]; then
         fail "hide (flag on): assertions failed after $phase_b_attempt attempts"
       fi

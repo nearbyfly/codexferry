@@ -32,6 +32,7 @@ wait_healthz() { # $1 = base url
 # optional extra [server] line (e.g. "hide_bundled_models = true" for the
 # hide_bundled scenario); empty renders a harmless blank line.
 write_router_config() { # $1 path, $2 router port, $3 mock port, $4 optional extra [server] line
+  # NOTE: the heredoc below is UNQUOTED (<<EOF), so the ${4:-} line is shell-expanded - pass only literal $4 values (no $ or backticks).
   cat > "$1" <<EOF
 [server]
 host = "127.0.0.1"
