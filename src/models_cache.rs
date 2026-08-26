@@ -19,7 +19,9 @@ use std::time::{Duration, Instant, SystemTime};
 /// File-backed templates are invalidated by mtime, but a shell-out template
 /// (or a temporary discovery failure) has no path to stat. The cache re-runs
 /// template discovery on this cadence instead of never, so a Codex upgrade or
-/// a transient failure cannot leave the catalog stale indefinitely.
+/// a transient failure cannot leave the catalog stale indefinitely. With hide
+/// overrides enabled, file-backed entries re-probe on this cadence too: the
+/// bundled catalog comes from a shell-out with no mtime to stat.
 const TEMPLATE_RECHECK_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Compute a hex ETag from bytes using `DefaultHasher` (no sha2 dependency).
@@ -42,11 +44,12 @@ struct Cached {
     /// Modification time of `template_path`, when it exists.
     template_mtime: Option<SystemTime>,
     /// When this entry was last built; drives periodic re-discovery when
-    /// `template_path` is `None`.
+    /// `template_path` is `None` — or when hide overrides were appended,
+    /// which re-probe even on a file-backed template.
     checked_at: Instant,
-    /// Whether hide entries were appended at build time — drives the
-    /// periodic re-probe even when the template is file-backed (the
-    /// bundled catalog comes from a shell-out with no mtime).
+    /// The `hide_bundled_models` flag value at build time — drives the
+    /// periodic re-probe even when the template is file-backed (re-probing
+    /// also retries a transiently-failing discovery).
     hide_bundled: bool,
 }
 
@@ -124,6 +127,9 @@ impl CatalogCache {
                 let route_keys: std::collections::HashSet<&str> =
                     config.routes.keys().map(String::as_str).collect();
                 let entries = crate::catalog::build_hide_entries(&bundled, &route_keys);
+                // build_catalog_value always emits a `models` array; the
+                // assert documents the invariant (no panic risk).
+                debug_assert!(generated.catalog["models"].is_array());
                 if let Some(models) = generated.catalog["models"].as_array_mut() {
                     models.extend(entries);
                 }
@@ -380,6 +386,12 @@ context_window = 1000
             let cached = inner.as_mut().unwrap();
             // Simulate a file-backed template + an aged entry.
             cached.template_path = Some(PathBuf::from("/nonexistent-template.json"));
+            // Force template_mtime to None so the mtime comparison stays
+            // None == None: a stale mtime would trigger the rebuild via the
+            // mtime-mismatch branch, not the recheck_due branch this test
+            // targets (and on a host with a real file-backed template the
+            // first build stores a real mtime, so this must be explicit).
+            cached.template_mtime = None;
             cached.checked_at =
                 std::time::Instant::now() - (TEMPLATE_RECHECK_INTERVAL + Duration::from_secs(1));
         }

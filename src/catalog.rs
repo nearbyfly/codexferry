@@ -37,6 +37,7 @@
 use crate::config::{Config, ValidatedConfig};
 use serde_json::{json, Map, Value};
 use std::path::Path;
+use std::time::Duration;
 
 /// Generation output: the catalog JSON plus the template field names dropped
 /// by the allowlist (logged by `run_gen_catalog`, ignored by callers that
@@ -453,6 +454,12 @@ pub(crate) fn reload_template() -> (Option<std::path::PathBuf>, Option<Value>) {
     }
 }
 
+/// Bound on a single `codex debug models --bundled` discovery run. A hung
+/// `codex` must not wedge the `/models` request path or the config
+/// hot-reload writer indefinitely (Task 4 review; output is small, so a
+/// post-exit read cannot deadlock on the pipe buffer).
+const BUNDLED_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Discover the installed Codex CLI's bundled model catalog by shelling out
 /// to `codex debug models --bundled` (hide-bundled spec §Decisions 3: the
 /// ONLY source for hide overrides — `load_template`'s file fallbacks may be
@@ -469,16 +476,43 @@ pub(crate) fn discover_bundled_models() -> Vec<Value> {
 /// binary without mutating process-global `PATH` (which races parallel
 /// tests — spec §Freshness).
 fn bundled_from_command(cmd: &str) -> Vec<Value> {
-    let Ok(output) = std::process::Command::new(cmd)
+    bundled_from_command_with_timeout(cmd, BUNDLED_DISCOVERY_TIMEOUT)
+}
+
+/// Like [`bundled_from_command`] but bounded by `timeout`: on expiry the
+/// child is killed and the result degrades to empty (spec §Decisions 4).
+/// Split out so the timeout path is testable without waiting out the real
+/// 10s constant.
+fn bundled_from_command_with_timeout(cmd: &str, timeout: Duration) -> Vec<Value> {
+    use std::io::Read;
+    let Ok(mut child) = std::process::Command::new(cmd)
         .args(["debug", "models", "--bundled"])
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
     else {
         return Vec::new();
     };
-    if !output.status.success() {
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        if let Some(status) = child.try_wait().ok().flatten() {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Vec::new();
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let mut stdout = Vec::new();
+    if let Some(mut out) = child.stdout.take() {
+        let _ = out.read_to_end(&mut stdout);
+    }
+    if !status.success() {
         return Vec::new();
     }
-    parse_bundled_output(&output.stdout)
+    parse_bundled_output(&stdout)
 }
 
 /// Parse the `{"models": [...]}` stdout of `codex debug models --bundled`.
@@ -1088,6 +1122,26 @@ format = "chat"
             slugs,
             vec!["alpha", "zeta"],
             "route collision skipped, output sorted by slug"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bundled_from_command_times_out_and_kills() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("hung-codex");
+        std::fs::write(&script, "#!/bin/sh\nsleep 30\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let start = std::time::Instant::now();
+        let models = bundled_from_command_with_timeout(
+            script.to_str().unwrap(),
+            std::time::Duration::from_millis(300),
+        );
+        assert!(models.is_empty(), "hung discovery must degrade to empty");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "timeout must bound the wait"
         );
     }
 }
