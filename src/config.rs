@@ -78,10 +78,11 @@ pub struct Config {
     pub quirks: QuirksConfig,
 }
 
-/// `[server]` section: where the proxy listens.
+/// `[server]` section: where the proxy listens and how the live model
+/// catalog is served.
 ///
-/// Both fields are optional; defaults are `127.0.0.1:8787` (localhost only
-/// — this is a personal-use tool with no authentication).
+/// Address/port fields are optional; defaults are `127.0.0.1:8787`
+/// (localhost only — this is a personal-use tool with no authentication).
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServerConfig {
     /// Bind address. Defaults to `127.0.0.1`.
@@ -90,12 +91,19 @@ pub struct ServerConfig {
     /// Bind port. Defaults to `8787`.
     #[serde(default = "default_port")]
     pub port: u16,
+    /// Emit `visibility: "hide"` overrides for the Codex-bundled models on
+    /// the live `/models` catalog endpoint (dynamic-mode wiring only;
+    /// `gen-catalog` output is never affected). Defaults to `false`. See
+    /// docs/superpowers/specs/2026-08-26-hide-bundled-models-design.md.
+    #[serde(default)]
+    pub hide_bundled_models: bool,
 }
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             host: default_host(),
             port: default_port(),
+            hide_bundled_models: false,
         }
     }
 }
@@ -1133,5 +1141,33 @@ format = "chat"
             );
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod server_config_tests {
+    use super::*;
+
+    #[test]
+    fn hide_bundled_models_defaults_false() {
+        let cfg = Config::parse_str(
+            "[providers.ds]\nbase_url=\"http://x\"\napi_key=\"k\"\nformat=\"chat\"\n\
+             [routes]\n\"ds/a\" = { model = \"m\", context_window = 1000 }\n",
+        )
+        .unwrap();
+        let validated = cfg.validate().unwrap();
+        assert!(!validated.server.hide_bundled_models);
+    }
+
+    #[test]
+    fn hide_bundled_models_parses_from_server_section() {
+        let cfg = Config::parse_str(
+            "[server]\nhide_bundled_models = true\n\
+             [providers.ds]\nbase_url=\"http://x\"\napi_key=\"k\"\nformat=\"chat\"\n\
+             [routes]\n\"ds/a\" = { model = \"m\", context_window = 1000 }\n",
+        )
+        .unwrap();
+        let validated = cfg.validate().unwrap();
+        assert!(validated.server.hide_bundled_models);
     }
 }
