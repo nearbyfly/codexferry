@@ -97,7 +97,7 @@ hide_bundled_models = true
 ```
 
 makes the live `/models` catalog additionally return `visibility: "hide"`
-copies of every bundled model (discovered via `codex debug models
+copies of every picker-visible bundled model (discovered via `codex debug models
 --bundled`), which suppresses them from the picker while your routes stay
 selectable. If the `codex` binary is not on the proxy's `PATH`, hiding is
 silently disabled and the bundled models reappear — check the daemon log
