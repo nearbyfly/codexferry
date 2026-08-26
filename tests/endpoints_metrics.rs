@@ -423,6 +423,182 @@ format = "chat"
 }
 
 #[tokio::test]
+/// hide_bundled_models (dynamic mode): with the flag on, the catalog-shape
+/// /models response must carry `visibility: "hide"` overrides cloned from
+/// the (faked) bundled catalog so codex's slug merge hides them; with the
+/// flag off they must be absent. The chat-list shape must never contain
+/// them. Toggling the flag via config hot-reload must rebuild the catalog.
+async fn models_catalog_hides_bundled_models_when_enabled() {
+    // Fake `codex` binary: `codex debug models --bundled` prints one
+    // list-visible and one already-hidden model. Prepending its directory
+    // to the child's PATH shadows any real codex install.
+    let bin_dir = tempfile::tempdir().expect("bin tempdir");
+    let fake_codex = bin_dir.path().join("codex");
+    std::fs::write(
+        &fake_codex,
+        "#!/bin/sh\necho '{\"models\":[{\"slug\":\"gpt-fake-sol\",\"visibility\":\"list\",\"priority\":1},{\"slug\":\"gpt-fake-old\",\"visibility\":\"hide\",\"priority\":2}]}'",
+    )
+    .expect("write fake codex");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake_codex, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod fake codex");
+    }
+    let child_path = format!(
+        "{}:{}",
+        bin_dir.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let base_config = |port: u16, hide: bool| {
+        format!(
+            r#"
+[server]
+host = "127.0.0.1"
+port = {port}
+hide_bundled_models = {hide}
+
+[providers.ds]
+base_url = "http://x"
+api_key = "k"
+format = "chat"
+
+[routes]
+"ds/a" = {{ model = "m", context_window = 1000 }}
+"#
+        )
+    };
+
+    // TOCTOU retry, mirroring models_endpoint_reflects_hot_reload.
+    let mut started = None;
+    for attempt in 0..2 {
+        let port = free_port();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, base_config(port, false)).expect("write config");
+        let stderr_path = dir.path().join("router.stderr.log");
+        let stderr = std::fs::File::create(&stderr_path).expect("create stderr log");
+        let bin = env!("CARGO_BIN_EXE_codexferry");
+        let child = std::process::Command::new(bin)
+            .env("CODEXFERRY_CONFIG", &config_path)
+            .env("PATH", &child_path)
+            .stdout(Stdio::null())
+            .stderr(stderr)
+            .spawn()
+            .expect("spawn codexferry");
+        let guard = RouterGuard {
+            child,
+            stderr_path,
+            _dir: dir,
+        };
+        let router_url = format!("http://127.0.0.1:{port}");
+        match wait_for_healthz(&router_url, &guard).await {
+            Ok(()) => {
+                started = Some((guard, router_url, config_path, port));
+                break;
+            }
+            Err(log) => {
+                drop(guard);
+                if attempt == 1 {
+                    panic!("router did not become healthy within 10s; stderr:\n{log}");
+                }
+            }
+        }
+    }
+    let (_guard, router_url, config_path, port) =
+        started.expect("retry loop always returns or panics");
+
+    let client = reqwest::Client::new();
+
+    // 1. Flag off: no hide entries in the catalog shape.
+    let resp = client
+        .get(format!("{router_url}/v1/models?client_version=0.0.0"))
+        .send()
+        .await
+        .expect("models get (flag off)");
+    let body = resp.text().await.unwrap();
+    assert!(
+        !body.contains("gpt-fake-sol"),
+        "flag off must not append hide entries:\n{body}"
+    );
+
+    // 2. Chat-list shape (no client_version): routes only, BEFORE the flag
+    //    is turned on (spec §Decisions 2).
+    let resp = client
+        .get(format!("{router_url}/v1/models"))
+        .send()
+        .await
+        .expect("chat-list models get");
+    let list: Value = resp.json().await.unwrap();
+    let ids: Vec<&str> = list["data"]
+        .as_array()
+        .expect("data array")
+        .iter()
+        .map(|m| m["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["ds/a"]);
+
+    // 3. Toggle the flag via hot-reload and poll until the hide entry
+    //    appears with visibility "hide".
+    std::fs::write(&config_path, base_config(port, true)).expect("rewrite config with hide on");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let resp = client
+            .get(format!("{router_url}/v1/models?client_version=0.0.0"))
+            .send()
+            .await
+            .expect("poll models get");
+        let body = resp.text().await.unwrap();
+        let v: Value = serde_json::from_str(&body).unwrap();
+        let models = v["models"].as_array().expect("models array");
+        let sol = models.iter().find(|m| m["slug"] == "gpt-fake-sol");
+        let done = match sol {
+            Some(m) => {
+                assert_eq!(m["visibility"], "hide", "override must hide:\n{body}");
+                true
+            }
+            None => false,
+        };
+        if done {
+            assert!(
+                !models.iter().any(|m| m["slug"] == "gpt-fake-old"),
+                "already-hidden bundled entries need no override:\n{body}"
+            );
+            assert!(
+                models
+                    .iter()
+                    .any(|m| m["slug"] == "ds/a" && m["visibility"] == "list"),
+                "route stays list-visible:\n{body}"
+            );
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "hide entry did not appear within 5s of hot-reload; last body:\n{body}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // 4. Chat-list shape stays routes-only even after the flag is on
+    //    (spec §Decisions 2): the no-client_version branch never reads
+    //    hide entries.
+    let resp = client
+        .get(format!("{router_url}/v1/models"))
+        .send()
+        .await
+        .expect("chat-list models get (after toggle)");
+    let list: Value = resp.json().await.unwrap();
+    let ids: Vec<&str> = list["data"]
+        .as_array()
+        .expect("data array")
+        .iter()
+        .map(|m| m["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["ds/a"]);
+}
+
+#[tokio::test]
 #[ignore = "requires local codex CLI; run explicitly: cargo test --release -- --ignored"]
 async fn doctor_live_probe_report_has_no_failures() {
     if std::process::Command::new("codex")
