@@ -236,10 +236,7 @@ async fn chat_handler(
 /// (env_key providers never fetch, so under static wiring the JSONL record
 /// must contain zero `/v1/models` entries). Returns 200 with an empty
 /// `ModelsResponse`; live-mode tests do not depend on this endpoint.
-async fn models_probe(
-    State(state): State<MockState>,
-    headers: axum::http::HeaderMap,
-) -> Response {
+async fn models_probe(State(state): State<MockState>, headers: axum::http::HeaderMap) -> Response {
     let auth = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())

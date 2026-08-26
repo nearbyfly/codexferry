@@ -134,7 +134,11 @@ pub fn run_doctor(
     // `--live` forces it and `--offline` skips it, so both avoid a
     // redundant `codex --version` spawn. The captured output doubles as
     // the persisted-state record on the composed default path.
-    let codex_version = if live || offline { None } else { codex_version_output() };
+    let codex_version = if live || offline {
+        None
+    } else {
+        codex_version_output()
+    };
     let available = codex_version.is_some();
     let run_live = live_requested(live, offline, available);
     if run_live && live {
@@ -646,11 +650,7 @@ pub(crate) fn pin_shadow_warn(codex_toml: Option<&str>) -> Option<Check> {
             providers.values().any(|p| {
                 p.get("auth")
                     .and_then(toml::Value::as_table)
-                    .is_some_and(|auth| {
-                        auth.get("command")
-                            .and_then(toml::Value::as_str)
-                            .is_some()
-                    })
+                    .is_some_and(|auth| auth.get("command").and_then(toml::Value::as_str).is_some())
             })
         });
     if !has_auth_command {
@@ -939,13 +939,10 @@ fn fetch_models(base_url: &str) -> ModelsFetch {
             .map_err(|e| format!("tokio runtime: {e}"))?;
         rt.block_on(async move {
             let client = reqwest::Client::new();
-            let resp = tokio::time::timeout(
-                Duration::from_secs(5),
-                client.get(&url).send(),
-            )
-            .await
-            .map_err(|_| "timeout after 5s".to_string())?
-            .map_err(|e| format!("request failed: {e}"))?;
+            let resp = tokio::time::timeout(Duration::from_secs(5), client.get(&url).send())
+                .await
+                .map_err(|_| "timeout after 5s".to_string())?
+                .map_err(|e| format!("request failed: {e}"))?;
             let status = resp.status().as_u16();
             let bytes = tokio::time::timeout(Duration::from_secs(5), resp.bytes())
                 .await
@@ -1073,8 +1070,12 @@ const LAST_VERIFIED: &[&str] = &[];
 /// `None` when codex is absent or its `--version` output carries no digit
 /// token to normalize. Visibility only, never a FAIL.
 pub(crate) fn version_age(codex_version: Option<&str>) -> Option<Check> {
-    let Some(raw) = codex_version else { return None; };
-    let Some(cur) = crate::version::normalize_version(raw) else { return None; };
+    let Some(raw) = codex_version else {
+        return None;
+    };
+    let Some(cur) = crate::version::normalize_version(raw) else {
+        return None;
+    };
     if LAST_VERIFIED.is_empty() {
         return Some(Check::info(
             "codex version age",
@@ -1889,9 +1890,7 @@ base_url = "http://127.0.0.1:9999/v1"
                         move |axum::extract::Query(query): axum::extract::Query<
                             std::collections::HashMap<String, String>,
                         >| async move {
-                            if query.get("client_version").map(String::as_str)
-                                != Some("probe")
-                            {
+                            if query.get("client_version").map(String::as_str) != Some("probe") {
                                 return (
                                     axum::http::StatusCode::BAD_REQUEST,
                                     "expected client_version=probe".to_string(),
@@ -1904,14 +1903,9 @@ base_url = "http://127.0.0.1:9999/v1"
                         },
                     ),
                 );
-                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-                    .await
-                    .unwrap();
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 let addr = listener.local_addr().unwrap();
-                let _ = tx.send((
-                    format!("http://127.0.0.1:{}/v1", addr.port()),
-                    addr.port(),
-                ));
+                let _ = tx.send((format!("http://127.0.0.1:{}/v1", addr.port()), addr.port()));
                 axum::serve(listener, app).await.unwrap();
             });
         });
@@ -1962,7 +1956,10 @@ base_url = "http://127.0.0.1:9999/v1"
     #[test]
     fn models_endpoint_shape_fails_on_a_missing_required_field() {
         let mut pin = good_pin(&["x/a"]);
-        pin["models"][0].as_object_mut().unwrap().remove("visibility");
+        pin["models"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("visibility");
         let (base, _) = spawn_models_stub(200, &serde_json::to_string(&pin).unwrap());
         let c = models_endpoint_shape(&fetch_models(&base));
         assert_eq!(c.status, CheckStatus::Fail, "{c:?}");
