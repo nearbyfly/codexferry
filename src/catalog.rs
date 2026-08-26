@@ -490,6 +490,47 @@ fn parse_bundled_output(stdout: &[u8]) -> Vec<Value> {
         .unwrap_or_default()
 }
 
+/// Build override entries that hide the Codex-bundled models from the
+/// dynamic-mode picker (hide-bundled spec §Mechanism).
+///
+/// Every bundled entry with `visibility: "list"` is CLONED with visibility
+/// flipped to `"hide"`: codex's dynamic merge (`apply_remote_models`)
+/// replaces bundled entries by slug, and `show_in_picker` is true only for
+/// `"list"`, so the clone suppresses the picker entry while preserving every
+/// other field — the clone round-trips codex's own serialization, so all
+/// fields required by codex's strict `ModelInfo` deserialization stay
+/// present. Entries already hidden need no override, and slugs that collide
+/// with a configured route key are skipped — the route must stay
+/// selectable. Output is sorted by slug so the response body is
+/// byte-reproducible across rebuilds.
+pub(crate) fn build_hide_entries(
+    bundled: &[Value],
+    route_keys: &std::collections::HashSet<&str>,
+) -> Vec<Value> {
+    let mut out: Vec<Value> = bundled
+        .iter()
+        .filter(|m| m.get("visibility").and_then(Value::as_str) == Some("list"))
+        .filter(|m| {
+            m.get("slug")
+                .and_then(Value::as_str)
+                .is_some_and(|slug| !route_keys.contains(slug))
+        })
+        .map(|m| {
+            let mut entry = m.clone();
+            if let Some(obj) = entry.as_object_mut() {
+                obj.insert("visibility".into(), json!("hide"));
+            }
+            entry
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        let slug_a = a.get("slug").and_then(Value::as_str).unwrap_or("");
+        let slug_b = b.get("slug").and_then(Value::as_str).unwrap_or("");
+        slug_a.cmp(slug_b)
+    });
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -957,6 +998,26 @@ format = "chat"
     fn parse_bundled_output_degrades_on_garbage() {
         assert!(parse_bundled_output(b"not json").is_empty());
         assert!(parse_bundled_output(br#"{"no_models": []}"#).is_empty());
+        assert!(parse_bundled_output(br#"{"models": "not-an-array"}"#).is_empty());
+    }
+
+    /// Run a script via [`bundled_from_command`], retrying transient empty
+    /// results. On this host kernel, `execve` of a freshly-written script can
+    /// transiently fail with `ETXTBSY` ("Text file busy") when other test
+    /// threads spawn processes concurrently; the file itself is intact and a
+    /// retry succeeds immediately. This is test-harness noise, not a logic
+    /// issue — retrying keeps the suite deterministic. A genuinely broken
+    /// script still surfaces: the retry window is short and the final
+    /// assertion below still fails on a persistent empty result.
+    fn bundled_from_command_retry(cmd: &str) -> Vec<Value> {
+        for _ in 0..5 {
+            let models = bundled_from_command(cmd);
+            if !models.is_empty() {
+                return models;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        Vec::new()
     }
 
     #[cfg(unix)]
@@ -971,7 +1032,7 @@ format = "chat"
         .unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let models = bundled_from_command(script.to_str().unwrap());
+        let models = bundled_from_command_retry(script.to_str().unwrap());
         assert_eq!(models.len(), 1);
         assert_eq!(models[0]["slug"], "gpt-x");
     }
@@ -979,5 +1040,53 @@ format = "chat"
     #[test]
     fn bundled_from_command_missing_binary_is_empty() {
         assert!(bundled_from_command("/nonexistent/codexferry-no-such-bin").is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bundled_from_command_nonzero_exit_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("failing-codex");
+        std::fs::write(&script, "#!/bin/sh\nexit 1\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(bundled_from_command(script.to_str().unwrap()).is_empty());
+    }
+
+    #[test]
+    fn build_hide_entries_clones_and_flips_only_list_entries() {
+        let bundled = vec![
+            json!({
+                "slug": "gpt-a", "visibility": "list", "priority": 1,
+                "base_instructions": "You are Codex."
+            }),
+            json!({"slug": "gpt-b", "visibility": "hide", "priority": 2}),
+            json!({"slug": "gpt-c", "visibility": "none", "priority": 3}),
+        ];
+        let entries = build_hide_entries(&bundled, &Default::default());
+        assert_eq!(entries.len(), 1, "only list-visible entries get overrides");
+        assert_eq!(entries[0]["slug"], "gpt-a");
+        assert_eq!(entries[0]["visibility"], "hide");
+        // Clone-flip must preserve every other field.
+        assert_eq!(entries[0]["priority"], 1);
+        assert_eq!(entries[0]["base_instructions"], "You are Codex.");
+    }
+
+    #[test]
+    fn build_hide_entries_skips_route_collisions_and_sorts_by_slug() {
+        let bundled = vec![
+            json!({"slug": "zeta", "visibility": "list"}),
+            json!({"slug": "alpha", "visibility": "list"}),
+            json!({"slug": "ds/claim", "visibility": "list"}),
+        ];
+        let route_keys: std::collections::HashSet<&str> =
+            ["ds/claim"].into_iter().collect();
+        let entries = build_hide_entries(&bundled, &route_keys);
+        let slugs: Vec<&str> = entries.iter().filter_map(|m| m["slug"].as_str()).collect();
+        assert_eq!(
+            slugs,
+            vec!["alpha", "zeta"],
+            "route collision skipped, output sorted by slug"
+        );
     }
 }
