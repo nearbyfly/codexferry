@@ -766,17 +766,21 @@ async fn handle_responses(State(state): State<Arc<AppState>>, body: axum::body::
     resp
 }
 
-/// Read a 4xx/5xx response body (bounded to 64KB) and extract
-/// `error.message` for the per-request log line. Returns the reconstructed
-/// response alongside the extracted detail so the client still receives the
-/// original body. Non-error statuses pass through untouched without reading
-/// the body.
+/// Read a 4xx/5xx response body and extract `error.message` for the
+/// per-request log line. Returns the reconstructed response alongside the
+/// extracted detail so the client still receives the original body.
+/// Non-error statuses pass through untouched without reading the body.
+///
+/// The read has no size cap: error bodies are already fully buffered by
+/// `upstream_non_2xx` before `error_response` serializes them, so this adds
+/// no new memory exposure. A cap here would silently strip oversized error
+/// bodies from the client response (to_bytes -> Err -> empty body).
 async fn extract_error_detail(resp: Response) -> (Response, Option<String>) {
     if !resp.status().is_client_error() && !resp.status().is_server_error() {
         return (resp, None);
     }
     let (parts, body) = resp.into_parts();
-    let bytes = axum::body::to_bytes(body, 64 * 1024)
+    let bytes = axum::body::to_bytes(body, usize::MAX)
         .await
         .unwrap_or_default();
     let detail = serde_json::from_slice::<serde_json::Value>(&bytes)

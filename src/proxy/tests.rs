@@ -191,6 +191,31 @@ async fn extract_error_detail_passes_success_through_untouched() {
 }
 
 #[tokio::test]
+async fn extract_error_detail_preserves_oversized_error_body() {
+    // Regression: the old 64KB to_bytes limit silently stripped oversized
+    // upstream error bodies from the client response (to_bytes -> Err ->
+    // unwrap_or_default -> empty body). The body must survive regardless
+    // of size; error responses are already bounded by the upstream read
+    // timeout in upstream_non_2xx, so buffering here adds no new risk.
+    let large_message = "x".repeat(100 * 1024); // 100KB, well over the old limit
+    let resp = error_response(StatusCode::BAD_GATEWAY, "upstream_error", &large_message);
+    let (resp, detail) = extract_error_detail(resp).await;
+    assert_eq!(resp.status(), 502);
+    assert_eq!(
+        detail.as_deref(),
+        Some(large_message.as_str()),
+        "error detail must still be extracted from oversized bodies"
+    );
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let v: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        v["error"]["message"].as_str().map(str::len),
+        Some(100 * 1024),
+        "oversized error body must not be stripped from the client response"
+    );
+}
+
+#[tokio::test]
 async fn models_chat_shape_unchanged_without_client_version() {
     let app = test_router_with_routes(&["ds/a", "ds/b"]).await;
     let resp = app
