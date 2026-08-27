@@ -157,14 +157,18 @@ git push github "$RELEASE_BRANCH" "$TAG"
 # `main` on the github remote - never on origin (gitea) - because
 # gitea already tracks the full main including docs/.
 #
-# We use `--force-with-lease=<expected>` rather than a plain fast-forward:
-# github's main can diverge from local main between releases (e.g. when
-# someone resets it via web UI, or after a force-push in a previous
-# release). --force-with-lease refuses to clobber unexpected SHAs, so a
-# typo in this script or a stray commit can't silently destroy history.
+# We use `--force-with-lease=<refname>:<expect>` — note the ORDER: refname
+# FIRST, expected SHA second. git silently ignores the lease when the two
+# are swapped, and the push degrades to a plain non-FF reject (exactly what
+# happened during the v0.1.3 release). We force rather than plain
+# fast-forward because github's main can diverge from local main between
+# releases (e.g. when someone resets it via web UI, or after a force-push
+# in a previous release). --force-with-lease refuses to clobber unexpected
+# SHAs, so a typo in this script or a stray commit can't silently destroy
+# history.
 EXPECTED_SHA="$(git rev-parse github/main 2>/dev/null || echo 0000000000000000000000000000000000000000)"
 log "fast-forwarding github main to release (expected current tip: ${EXPECTED_SHA:0:12})"
-git push github "$RELEASE_BRANCH:refs/heads/main" --force-with-lease="$EXPECTED_SHA:refs/heads/main"
+git push github "$RELEASE_BRANCH:refs/heads/main" --force-with-lease="refs/heads/main:$EXPECTED_SHA"
 log "verify on github: https://github.com/nearbyfly/codexferry/releases/tag/$TAG"
 
 # ---------- github release ----------
