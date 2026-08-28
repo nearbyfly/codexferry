@@ -34,6 +34,25 @@ Diagnostic evidence (2026-08-28 session):
   `>` redirection → same inode), so the broken save style was never
   exercised anywhere in the pyramid.
 
+**User-visible symptom as reported (2026-08-28, codex 0.148.0):** "codex
+`resume` used to pick up new models; on 0.148.0 a resumed session cannot
+see them - only a fresh session after restarting codex." Investigated
+against codex source at both 0.147.0 and 0.148.0 (`~/foss/codex`):
+the entire models fetch chain is **byte-identical between the two
+versions** (TUI bootstrap `ModelList`, app-server
+`supported_models`/`OnlineIfUncached`, `ThreadManager::list_models`,
+models-manager `manager.rs`/`cache.rs`), and the `/model` picker is a
+process-startup snapshot in BOTH versions. Not a codex regression. The
+reported regression is this spec's deaf watcher plus a confounder: the
+"restart codex -> new session works" path also coincided with a daemon
+restart, which loads new config at startup. `codex resume` only sees
+post-reload routes when BOTH links hold: the daemon hot-reloads the
+config (this fix), and the reload invalidates codex's
+`models_cache.json` (already implemented: `invalidate_codex_catalog_cache`
+runs in the applier after each successful reload) so the resumed
+process's startup fetch refetches. The e2e scenario below pins that
+combined contract end-to-end.
+
 ## Goal
 
 Config edits reach the running daemon regardless of save style (in-place
@@ -98,6 +117,15 @@ limitation.
 - **Unit:** the filename-relevance predicate (pure function over
   `&[PathBuf]` + `&str`) gets direct unit tests including the
   `.swp`-sibling and renamed-from cases.
+- **E2E, resume-after-reload (the 0.148.0-reported case):** a real codex
+  session is created under config v1 (route set A); the router config is
+  then atomically re-saved as v2 (route set A+B); after the daemon
+  reloads AND the scratch `models_cache.json` is invalidated,
+  `codex exec resume --last` (the resumed process refetches the catalog
+  at startup) must successfully use a route that only exists in v2, and
+  its rewritten cache must contain both route sets. Red on current code
+  at the route-appears poll (deaf watcher); would also catch a
+  regression that drops the reload-side cache invalidation.
 
 ## Out of scope
 
@@ -105,6 +133,7 @@ limitation.
 - Watching both the symlink's directory and the resolved directory
   (dual watch) — the canonicalize-once limitation is accepted and
   documented instead.
-- Any e2e scenario addition — the integration layer covers the
-  mechanics deterministically and faster.
+- Any e2e scenario beyond `resume_after_reload` (added by this spec
+  revision) — the integration layer covers the remaining mechanics
+  deterministically and faster.
 - notify backend swaps (PollWatcher) or IN_IGNORED re-arm hacks.
