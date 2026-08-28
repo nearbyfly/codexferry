@@ -810,8 +810,31 @@ fn event_touches_config(
 }
 
 pub fn spawn_watcher(path: &Path, shared: SharedConfig) -> anyhow::Result<impl Watcher> {
-    let path = path.to_path_buf();
-    let watch_path = path.clone();
+    // Resolve symlinks ONCE and watch the REAL file's parent directory
+    // with a filename filter (hot-reload-watcher spec §Design). An
+    // inode-level file watch dies permanently on the first atomic-rename
+    // editor save: the rename unlinks the watched inode, the kernel
+    // delivers IN_IGNORED, and notify drops the watch with nothing to
+    // re-arm it. The directory's inode is stable across file
+    // replacements. Limitation: the symlink is resolved at startup only
+    // — re-pointing it later requires a daemon restart.
+    let resolved = path.canonicalize().unwrap_or_else(|e| {
+        tracing::warn!(
+            "config path {} could not be canonicalized ({e}); \
+             watching the unresolved path's directory",
+            path.display()
+        );
+        path.to_path_buf()
+    });
+    let file_name = resolved
+        .file_name()
+        .map(std::ffi::OsStr::to_owned)
+        .ok_or_else(|| anyhow::anyhow!("config path has no file name: {}", resolved.display()))?;
+    let watch_dir = resolved
+        .parent()
+        .map(|p| p.to_path_buf())
+        .ok_or_else(|| anyhow::anyhow!("config path has no parent directory: {}", resolved.display()))?;
+    let watch_path = resolved;
     // Decouple the synchronous notify callback from the async RwLock: the
     // callback only sends (never blocks, never loses an update), and the
     // applier task awaits the write lock on the tokio runtime.
@@ -820,7 +843,9 @@ pub fn spawn_watcher(path: &Path, shared: SharedConfig) -> anyhow::Result<impl W
 
     let mut watcher = notify::recommended_watcher(move |res: Result<notify::Event, _>| {
         if let Ok(event) = res {
-            if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
+            if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_))
+                && event_touches_config(&event.paths, &file_name)
+            {
                 // Editors that save atomically (vim `set backupcopy=no`,
                 // emacs, many IDEs) write to a temp file then `rename(temp,
                 // target)` - the rename briefly unlinks the target before
@@ -856,10 +881,7 @@ pub fn spawn_watcher(path: &Path, shared: SharedConfig) -> anyhow::Result<impl W
             }
         }
     })?;
-    // Watch the file itself (non-recursive); the parent directory is what
-    // actually gets watched, which also catches editors that rewrite the
-    // file via rename.
-    watcher.watch(&path, RecursiveMode::NonRecursive)?;
+    watcher.watch(&watch_dir, RecursiveMode::NonRecursive)?;
     Ok(watcher)
 }
 

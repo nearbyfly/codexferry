@@ -632,3 +632,140 @@ async fn doctor_live_probe_report_has_no_failures() {
     assert!(out.status.success(), "doctor --live failed:\n{stdout}");
     assert!(!stdout.contains("FAIL"), "report contained FAIL:\n{stdout}");
 }
+
+// ---------------------------------------------------------------------------
+// Hot-reload atomic-save regression tests (Task 2)
+// ---------------------------------------------------------------------------
+
+/// Editor-style atomic save: write a sibling temp file, then rename(2)
+/// over the config. The file's inode is REPLACED each time — exactly the
+/// save style that permanently killed the old inode-level watch.
+fn editor_save(path: &std::path::Path, contents: &str) {
+    let tmp = path
+        .parent()
+        .expect("config has a parent dir")
+        .join("config.toml.editor-tmp");
+    std::fs::write(&tmp, contents).expect("write editor temp config");
+    std::fs::rename(&tmp, path).expect("atomic rename over config");
+}
+
+/// Poll the catalog until `slug` appears; 5s deadline with a failure
+/// message carrying the last body.
+async fn wait_for_slug(client: &reqwest::Client, base_url: &str, slug: &str) -> String {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let resp = client
+            .get(format!("{base_url}/v1/models?client_version=t"))
+            .send()
+            .await
+            .expect("models get");
+        let body = resp.text().await.unwrap();
+        if body.contains(&format!("\"{slug}\"")) {
+            return body;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "slug {slug} did not appear within 5s; last body:\n{body}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[tokio::test]
+/// Two successive editor-style (atomic-rename) config saves must EACH
+/// trigger a hot reload. The second save is the assertion's soul: it
+/// proves the first inode replacement did not kill the watch
+/// (hot-reload-watcher spec §Testing).
+async fn models_hot_reload_survives_editor_atomic_saves() {
+    let config_with_routes = |port: u16, routes: &str| {
+        format!(
+            r#"
+[server]
+host = "127.0.0.1"
+port = {port}
+
+[providers.ds]
+base_url = "http://x"
+api_key = "k"
+format = "chat"
+
+[routes]
+{routes}
+"#
+        )
+    };
+
+    // TOCTOU retry, mirroring models_endpoint_reflects_hot_reload.
+    let mut started = None;
+    for attempt in 0..2 {
+        let port = free_port();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            &config_with_routes(
+                port,
+                "\"ds/old\" = { model = \"m\", context_window = 1000 }",
+            ),
+        )
+        .expect("write config");
+        let stderr_path = dir.path().join("router.stderr.log");
+        let stderr = std::fs::File::create(&stderr_path).expect("create stderr log");
+        let bin = env!("CARGO_BIN_EXE_codexferry");
+        let child = std::process::Command::new(bin)
+            .env("CODEXFERRY_CONFIG", &config_path)
+            .stdout(Stdio::null())
+            .stderr(stderr)
+            .spawn()
+            .expect("spawn codexferry");
+        let guard = RouterGuard {
+            child,
+            stderr_path,
+            _dir: dir,
+        };
+        let router_url = format!("http://127.0.0.1:{port}");
+        match wait_for_healthz(&router_url, &guard).await {
+            Ok(()) => {
+                started = Some((guard, router_url, config_path, port));
+                break;
+            }
+            Err(log) => {
+                drop(guard);
+                if attempt == 1 {
+                    panic!("router did not become healthy within 10s; stderr:\n{log}");
+                }
+            }
+        }
+    }
+    let (_guard, router_url, config_path, port) =
+        started.expect("retry loop always returns or panics");
+    let client = reqwest::Client::new();
+
+    let _ = wait_for_slug(&client, &router_url, "ds/old").await;
+
+    // Save #1: ds/old -> ds/new (inode replaced).
+    editor_save(
+        &config_path,
+        &config_with_routes(
+            port,
+            "\"ds/new\" = { model = \"m\", context_window = 2000 }",
+        ),
+    );
+    let _ = wait_for_slug(&client, &router_url, "ds/new").await;
+
+    // Save #2: ds/new -> ds/final. On the OLD inode-watch this never
+    // appears — the watch died at save #1 (or at the last-gasp event),
+    // and this poll is the guaranteed red point.
+    editor_save(
+        &config_path,
+        &config_with_routes(
+            port,
+            "\"ds/final\" = { model = \"m\", context_window = 3000 }",
+        ),
+    );
+    let body = wait_for_slug(&client, &router_url, "ds/final").await;
+    assert!(
+        !body.contains("\"ds/old\""),
+        "stale route must be gone after reload:\n{body}"
+    );
+}
