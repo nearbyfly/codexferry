@@ -83,8 +83,10 @@ no lock is ever held across a subprocess call again.
      differs from `f_start`, discard the result (config changed mid-refresh;
      the next request sees the stale-fingerprint condition and refreshes
      again). Otherwise replace the `Cached` entry and reset `checked_at`.
-  5. Any failure keeps the old entry (today's degradation semantics
-     unchanged).
+  5. Subprocess failures degrade inside the rebuild exactly as today
+     (missing template → from-scratch catalog; empty bundled → hide off +
+     warn) and the rebuilt entry IS stored. Only a mid-refresh config
+     change discards the result, via the fingerprint guard.
 
 ### Cold start
 
@@ -126,7 +128,9 @@ of scope.
     fresh body;
   - fingerprint-guarded store: config flips mid-refresh (gate holds,
     config changed, release gate) → old-body stays until the NEXT refresh;
-  - refresh failure (discovery errors) keeps the old entry.
+  - empty-discovery degradation: rebuild proceeds without hide entries
+    (the existing hide tests' warn path covers this inline; no separate
+    background test needed).
 - **Integration:** existing `endpoints_metrics` tests regress unchanged
   (`/models` shape, ETag/304, hot-reload appearance — the poll loops absorb
   the SWR delay; `hide_bundled` toggle test likewise).
