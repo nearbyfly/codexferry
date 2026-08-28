@@ -769,3 +769,69 @@ format = "chat"
         "stale route must be gone after reload:\n{body}"
     );
 }
+
+#[tokio::test]
+/// Production layout from the 2026-08-28 incident: CODEXFERRY_CONFIG
+/// points at a SYMLINK while the real config lives in another directory.
+/// canonicalize() must bind the watch to the real file's directory so an
+/// atomic-rename edit of the real file triggers the reload
+/// (hot-reload-watcher spec §Testing).
+async fn models_hot_reload_via_symlinked_config_path() {
+    let port = free_port();
+    let real_dir = tempfile::tempdir().expect("real config dir");
+    let link_dir = tempfile::tempdir().expect("symlink dir");
+    let real_config = real_dir.path().join("cxf.toml");
+    let config_link = link_dir.path().join("cxf.toml");
+    std::os::unix::fs::symlink(&real_config, &config_link).expect("symlink config");
+    let config_text = format!(
+        r#"
+[server]
+host = "127.0.0.1"
+port = {port}
+
+[providers.ds]
+base_url = "http://x"
+api_key = "k"
+format = "chat"
+
+[routes]
+"ds/old" = {{ model = "m", context_window = 1000 }}
+"#
+    );
+    std::fs::write(&real_config, &config_text).expect("write real config");
+
+    let stderr_path = real_dir.path().join("router.stderr.log");
+    let stderr = std::fs::File::create(&stderr_path).expect("create stderr log");
+    let bin = env!("CARGO_BIN_EXE_codexferry");
+    let child = std::process::Command::new(bin)
+        .env("CODEXFERRY_CONFIG", &config_link)
+        .stdout(Stdio::null())
+        .stderr(stderr)
+        .spawn()
+        .expect("spawn codexferry");
+    let guard = RouterGuard {
+        child,
+        stderr_path,
+        _dir: link_dir,
+    };
+    // NOTE: `_dir` holds the symlink dir; `real_dir` must ALSO outlive the
+    // test — bind it here so both guards drop at test end.
+    let _real_guard = real_dir;
+    let router_url = format!("http://127.0.0.1:{port}");
+    wait_for_healthz(&router_url, &guard)
+        .await
+        .expect("router healthy");
+    let client = reqwest::Client::new();
+
+    let _ = wait_for_slug(&client, &router_url, "ds/old").await;
+
+    // Editor-style save on the REAL file (not through the symlink path):
+    // must still fire the reload.
+    let new_text = config_text.replace("ds/old", "ds/new");
+    assert_ne!(
+        new_text, config_text,
+        "fixture replace must change the config"
+    );
+    editor_save(&real_config, &new_text);
+    let _ = wait_for_slug(&client, &router_url, "ds/new").await;
+}

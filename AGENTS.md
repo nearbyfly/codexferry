@@ -94,6 +94,13 @@ blocking `write()` from the notify callback itself - it would stall the
 notify thread behind every in-flight request. The channel indirection keeps
 the notify thread free while guaranteeing delivery.
 
+The watcher itself binds to the canonicalized config path's PARENT
+directory with a filename filter — an inode-level file watch would die
+permanently on the first atomic-rename editor save (IN_IGNORED, no
+re-arm); the symlink is resolved once at startup, so re-pointing it
+requires a daemon restart (see
+`docs/superpowers/specs/2026-08-28-hot-reload-watcher-fix-design.md`).
+
 ### 8. Tool calls are accumulated during streaming, emitted at stream end
 
 Streaming tool calls arrive as deltas keyed by `index`. The `StreamConverter`
