@@ -313,8 +313,14 @@ format = "chat"
 
         let stderr = std::fs::File::create(&stderr_path).expect("create stderr log");
         let bin = env!("CARGO_BIN_EXE_codexferry");
+        // Pin CODEX_HOME to a subdir of the test's TempDir so the applier's
+        // invalidate_codex_catalog_cache() can't reach the developer's real
+        // ~/.codex/models_cache.json during a reload.
+        let codex_home = dir.path().join("codex-home");
+        std::fs::create_dir_all(&codex_home).expect("create codex-home");
         let child = std::process::Command::new(bin)
             .env("CODEXFERRY_CONFIG", &config_path)
+            .env("CODEX_HOME", &codex_home)
             .stdout(Stdio::null())
             .stderr(stderr)
             .spawn()
@@ -712,8 +718,14 @@ format = "chat"
         let stderr_path = dir.path().join("router.stderr.log");
         let stderr = std::fs::File::create(&stderr_path).expect("create stderr log");
         let bin = env!("CARGO_BIN_EXE_codexferry");
+        // Pin CODEX_HOME to a subdir of the test's TempDir so the applier's
+        // invalidate_codex_catalog_cache() can't reach the developer's real
+        // ~/.codex/models_cache.json during a reload.
+        let codex_home = dir.path().join("codex-home");
+        std::fs::create_dir_all(&codex_home).expect("create codex-home");
         let child = std::process::Command::new(bin)
             .env("CODEXFERRY_CONFIG", &config_path)
+            .env("CODEX_HOME", &codex_home)
             .stdout(Stdio::null())
             .stderr(stderr)
             .spawn()
@@ -803,8 +815,14 @@ format = "chat"
     let stderr_path = real_dir.path().join("router.stderr.log");
     let stderr = std::fs::File::create(&stderr_path).expect("create stderr log");
     let bin = env!("CARGO_BIN_EXE_codexferry");
+    // Pin CODEX_HOME to a subdir of the test's TempDir so the applier's
+    // invalidate_codex_catalog_cache() can't reach the developer's real
+    // ~/.codex/models_cache.json during a reload.
+    let codex_home = real_dir.path().join("codex-home");
+    std::fs::create_dir_all(&codex_home).expect("create codex-home");
     let child = std::process::Command::new(bin)
         .env("CODEXFERRY_CONFIG", &config_link)
+        .env("CODEX_HOME", &codex_home)
         .stdout(Stdio::null())
         .stderr(stderr)
         .spawn()

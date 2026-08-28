@@ -294,7 +294,13 @@ Codex CLI ──POST /v1/responses──▶ axum daemon (127.0.0.1:8787)
   topical binaries (`chat_conversion.rs`, `passthrough.rs`, `healing.rs`,
   `sessions.rs`, `endpoints_metrics.rs`), each spawning the real binary as a
   subprocess against a mock axum upstream. They use `CARGO_BIN_EXE_codexferry`
-  and poll `/healthz` before making assertions.
+  and poll `/healthz` before making assertions. Tests that trigger a hot reload
+  must pin `CODEX_HOME` to a subdir of the test's `TempDir` (e.g.
+  `.env("CODEX_HOME", dir.path().join("codex-home"))`) so the reload applier's
+  `invalidate_codex_catalog_cache()` cannot reach the developer's real
+  `~/.codex/models_cache.json` (raises on issue raised in code review of the
+  hot-reload-watcher-fix PR, PR #5; pre-existing pattern that PR also fixed
+  for the e2e harness in `scripts/e2e-lib.sh:107`).
 
 - **E2E scripts** (`scripts/e2e.sh`, `scripts/e2e-real.sh`) drive the real
   Codex CLI against a scripted mock (`src/bin/e2e-mock.rs`) or real upstreams.

@@ -390,7 +390,7 @@ codexferry/
     ├── passthrough.rs        # responses-format relay tests (438)
     ├── healing.rs            # dsml/think leak healing tests (352)
     ├── sessions.rs           # cross-turn session tests (197)
-    └── endpoints_metrics.rs  # healthz, models, metrics, doctor tests (837)
+    └── endpoints_metrics.rs  # healthz, models, metrics, doctor tests (855)
 ```
 
 > Line counts are approximate and include comments; they drift as the code evolves.
