@@ -104,7 +104,12 @@ install_from_tarball() { # $1 = tarball path, $2 = version without leading v
   [[ "$reported" == "$ver" ]] \
     || fail "binary self-reports version '$reported', expected '$ver' - refusing to install"
   dest="$BIN_DIR/codexferry-$ver"
-  cp "$extract_dir/codexferry" "$dest"
+  # Install via temp file + rename: cp over a running executable fails with
+  # ETXTBSY ("Text file busy"), while rename(2) atomically swaps the
+  # directory entry and the running process keeps the old inode (found
+  # during a same-version reinstall over the live daemon).
+  cp "$extract_dir/codexferry" "$dest.new"
+  mv "$dest.new" "$dest"
   log "installed $dest"
 }
 
