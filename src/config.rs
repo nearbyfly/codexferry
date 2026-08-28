@@ -797,6 +797,18 @@ pub type SharedConfig = Arc<RwLock<ValidatedConfig>>;
 /// The returned `impl Watcher` must be kept alive for the process lifetime
 /// (the caller in `proxy::serve` stores it in `_watcher`); dropping it stops
 /// watching and closes the channel, which ends the applier task.
+/// Whether any path in a notify event refers to the config file itself
+/// (final-component match). The watcher observes the whole parent
+/// DIRECTORY, so this filters out editor temporaries (\.swp, 4913,
+/// rename sources) and unrelated directory activity (hot-reload-watcher
+/// spec §Design "Event filter").
+fn event_touches_config(
+    paths: &[std::path::PathBuf],
+    file_name: &std::ffi::OsStr,
+) -> bool {
+    paths.iter().any(|p| p.file_name() == Some(file_name))
+}
+
 pub fn spawn_watcher(path: &Path, shared: SharedConfig) -> anyhow::Result<impl Watcher> {
     let path = path.to_path_buf();
     let watch_path = path.clone();
@@ -1170,4 +1182,40 @@ mod server_config_tests {
         let validated = cfg.validate().unwrap();
         assert!(validated.server.hide_bundled_models);
     }
+
+
+#[cfg(test)]
+mod watcher_tests {
+    use super::*;
+
+    #[test]
+    fn event_touches_config_matches_only_the_exact_filename() {
+        let name = std::ffi::OsStr::new("cxf.toml");
+        // Direct hit (in-place write on the watched directory).
+        assert!(event_touches_config(
+            &[std::path::PathBuf::from("/etc/cxf.toml")],
+            name
+        ));
+        // Rename events carry from+to paths; the to-path matches.
+        assert!(event_touches_config(
+            &[
+                std::path::PathBuf::from("/etc/cxf.toml.editor-tmp"),
+                std::path::PathBuf::from("/etc/cxf.toml"),
+            ],
+            name
+        ));
+        // Editor temporaries and unrelated files never match.
+        assert!(!event_touches_config(
+            &[std::path::PathBuf::from("/etc/.cxf.toml.swp")],
+            name
+        ));
+        assert!(!event_touches_config(
+            &[std::path::PathBuf::from("/etc/4913")],
+            name
+        ));
+        // No paths -> not relevant.
+        assert!(!event_touches_config(&[], name));
+    }
+}
+
 }
