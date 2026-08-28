@@ -313,8 +313,14 @@ format = "chat"
 
         let stderr = std::fs::File::create(&stderr_path).expect("create stderr log");
         let bin = env!("CARGO_BIN_EXE_codexferry");
+        // Pin CODEX_HOME to a subdir of the test's TempDir so the applier's
+        // invalidate_codex_catalog_cache() can't reach the developer's real
+        // ~/.codex/models_cache.json during a reload.
+        let codex_home = dir.path().join("codex-home");
+        std::fs::create_dir_all(&codex_home).expect("create codex-home");
         let child = std::process::Command::new(bin)
             .env("CODEXFERRY_CONFIG", &config_path)
+            .env("CODEX_HOME", &codex_home)
             .stdout(Stdio::null())
             .stderr(stderr)
             .spawn()
@@ -631,4 +637,219 @@ async fn doctor_live_probe_report_has_no_failures() {
     println!("{stdout}");
     assert!(out.status.success(), "doctor --live failed:\n{stdout}");
     assert!(!stdout.contains("FAIL"), "report contained FAIL:\n{stdout}");
+}
+
+// ---------------------------------------------------------------------------
+// Hot-reload atomic-save regression tests (Task 2)
+// ---------------------------------------------------------------------------
+
+/// Editor-style atomic save: write a sibling temp file, then rename(2)
+/// over the config. The file's inode is REPLACED each time — exactly the
+/// save style that permanently killed the old inode-level watch.
+fn editor_save(path: &std::path::Path, contents: &str) {
+    let tmp = path
+        .parent()
+        .expect("config has a parent dir")
+        .join("config.toml.editor-tmp");
+    std::fs::write(&tmp, contents).expect("write editor temp config");
+    std::fs::rename(&tmp, path).expect("atomic rename over config");
+}
+
+/// Poll the catalog until `slug` appears; 5s deadline with a failure
+/// message carrying the last body.
+async fn wait_for_slug(client: &reqwest::Client, base_url: &str, slug: &str) -> String {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let resp = client
+            .get(format!("{base_url}/v1/models?client_version=t"))
+            .send()
+            .await
+            .expect("models get");
+        let body = resp.text().await.unwrap();
+        if body.contains(&format!("\"{slug}\"")) {
+            return body;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "slug {slug} did not appear within 5s; last body:\n{body}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[tokio::test]
+/// Two successive editor-style (atomic-rename) config saves must EACH
+/// trigger a hot reload. The second save is the assertion's soul: it
+/// proves the first inode replacement did not kill the watch
+/// (hot-reload-watcher spec §Testing).
+async fn models_hot_reload_survives_editor_atomic_saves() {
+    let config_with_routes = |port: u16, routes: &str| {
+        format!(
+            r#"
+[server]
+host = "127.0.0.1"
+port = {port}
+
+[providers.ds]
+base_url = "http://x"
+api_key = "k"
+format = "chat"
+
+[routes]
+{routes}
+"#
+        )
+    };
+
+    // TOCTOU retry, mirroring models_endpoint_reflects_hot_reload.
+    let mut started = None;
+    for attempt in 0..2 {
+        let port = free_port();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            &config_with_routes(
+                port,
+                "\"ds/old\" = { model = \"m\", context_window = 1000 }",
+            ),
+        )
+        .expect("write config");
+        let stderr_path = dir.path().join("router.stderr.log");
+        let stderr = std::fs::File::create(&stderr_path).expect("create stderr log");
+        let bin = env!("CARGO_BIN_EXE_codexferry");
+        // Pin CODEX_HOME to a subdir of the test's TempDir so the applier's
+        // invalidate_codex_catalog_cache() can't reach the developer's real
+        // ~/.codex/models_cache.json during a reload.
+        let codex_home = dir.path().join("codex-home");
+        std::fs::create_dir_all(&codex_home).expect("create codex-home");
+        let child = std::process::Command::new(bin)
+            .env("CODEXFERRY_CONFIG", &config_path)
+            .env("CODEX_HOME", &codex_home)
+            .stdout(Stdio::null())
+            .stderr(stderr)
+            .spawn()
+            .expect("spawn codexferry");
+        let guard = RouterGuard {
+            child,
+            stderr_path,
+            _dir: dir,
+        };
+        let router_url = format!("http://127.0.0.1:{port}");
+        match wait_for_healthz(&router_url, &guard).await {
+            Ok(()) => {
+                started = Some((guard, router_url, config_path, port));
+                break;
+            }
+            Err(log) => {
+                drop(guard);
+                if attempt == 1 {
+                    panic!("router did not become healthy within 10s; stderr:\n{log}");
+                }
+            }
+        }
+    }
+    let (_guard, router_url, config_path, port) =
+        started.expect("retry loop always returns or panics");
+    let client = reqwest::Client::new();
+
+    let _ = wait_for_slug(&client, &router_url, "ds/old").await;
+
+    // Save #1: ds/old -> ds/new (inode replaced).
+    editor_save(
+        &config_path,
+        &config_with_routes(
+            port,
+            "\"ds/new\" = { model = \"m\", context_window = 2000 }",
+        ),
+    );
+    let _ = wait_for_slug(&client, &router_url, "ds/new").await;
+
+    // Save #2: ds/new -> ds/final. On the OLD inode-watch this never
+    // appears — the watch died at save #1 (or at the last-gasp event),
+    // and this poll is the guaranteed red point.
+    editor_save(
+        &config_path,
+        &config_with_routes(
+            port,
+            "\"ds/final\" = { model = \"m\", context_window = 3000 }",
+        ),
+    );
+    let body = wait_for_slug(&client, &router_url, "ds/final").await;
+    assert!(
+        !body.contains("\"ds/old\""),
+        "stale route must be gone after reload:\n{body}"
+    );
+}
+
+#[tokio::test]
+/// Production layout from the 2026-08-28 incident: CODEXFERRY_CONFIG
+/// points at a SYMLINK while the real config lives in another directory.
+/// canonicalize() must bind the watch to the real file's directory so an
+/// atomic-rename edit of the real file triggers the reload
+/// (hot-reload-watcher spec §Testing).
+async fn models_hot_reload_via_symlinked_config_path() {
+    let port = free_port();
+    let real_dir = tempfile::tempdir().expect("real config dir");
+    let link_dir = tempfile::tempdir().expect("symlink dir");
+    let real_config = real_dir.path().join("cxf.toml");
+    let config_link = link_dir.path().join("cxf.toml");
+    std::os::unix::fs::symlink(&real_config, &config_link).expect("symlink config");
+    let config_text = format!(
+        r#"
+[server]
+host = "127.0.0.1"
+port = {port}
+
+[providers.ds]
+base_url = "http://x"
+api_key = "k"
+format = "chat"
+
+[routes]
+"ds/old" = {{ model = "m", context_window = 1000 }}
+"#
+    );
+    std::fs::write(&real_config, &config_text).expect("write real config");
+
+    let stderr_path = real_dir.path().join("router.stderr.log");
+    let stderr = std::fs::File::create(&stderr_path).expect("create stderr log");
+    let bin = env!("CARGO_BIN_EXE_codexferry");
+    // Pin CODEX_HOME to a subdir of the test's TempDir so the applier's
+    // invalidate_codex_catalog_cache() can't reach the developer's real
+    // ~/.codex/models_cache.json during a reload.
+    let codex_home = real_dir.path().join("codex-home");
+    std::fs::create_dir_all(&codex_home).expect("create codex-home");
+    let child = std::process::Command::new(bin)
+        .env("CODEXFERRY_CONFIG", &config_link)
+        .env("CODEX_HOME", &codex_home)
+        .stdout(Stdio::null())
+        .stderr(stderr)
+        .spawn()
+        .expect("spawn codexferry");
+    let guard = RouterGuard {
+        child,
+        stderr_path,
+        _dir: link_dir,
+    };
+    // NOTE: `_dir` holds the symlink dir; `real_dir` must ALSO outlive the
+    // test — bind it here so both guards drop at test end.
+    let _real_guard = real_dir;
+    let router_url = format!("http://127.0.0.1:{port}");
+    wait_for_healthz(&router_url, &guard)
+        .await
+        .expect("router healthy");
+    let client = reqwest::Client::new();
+
+    let _ = wait_for_slug(&client, &router_url, "ds/old").await;
+
+    // Editor-style save on the REAL file (not through the symlink path):
+    // must still fire the reload.
+    let new_text = config_text.replace("ds/old", "ds/new");
+    assert_ne!(
+        new_text, config_text,
+        "fixture replace must change the config"
+    );
+    editor_save(&real_config, &new_text);
+    let _ = wait_for_slug(&client, &router_url, "ds/new").await;
 }

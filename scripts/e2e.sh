@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # E2E: real Codex CLI against codexferry over the scripted e2e-mock upstream.
-# Usage: scripts/e2e.sh [basic|models|static|tools|multiturn|cross_format_switch|stale_catalog|doctor_dynamic|doctor_pinned|doctor_fallback|hide_bundled|all]   (default: all)
+# Usage: scripts/e2e.sh [basic|models|static|tools|multiturn|cross_format_switch|resume_after_reload|stale_catalog|doctor_dynamic|doctor_pinned|doctor_fallback|hide_bundled|all]   (default: all)
 # Requires: codex CLI on PATH, python3, curl. Never touches ~/.codex or the
 # resident router's config — the CLI's CODEX_HOME is redirected to the
 # artifact dir. Markers that also appear in the user-prompt echo are asserted
@@ -355,6 +355,66 @@ scenario_cross_format_switch() {
 # StaticModelsManager regardless of auth shape). If a future change ever
 # adds a silent "pin-miss -> live fetch" fallback, the /v1/models
 # assertion catches it.
+# Resume-after-reload (2026-08-28 second incident, reported against codex
+# 0.148.0; source-verified NOT a codex regression - the 0.147/0.148 fetch
+# chains are identical, see spec §Problem). A codex session created under
+# config v1 must be able to RESUME and use a route that only exists in
+# config v2 (atomic editor-style save). Codex's catalog is a
+# process-startup snapshot + models_cache.json; the resumed process sees
+# new routes only when the daemon hot-reloads AND the reload invalidates
+# codex's cache so the resume's startup fetch refetches. This scenario
+# pins both links plus the resumed turn itself.
+scenario_resume_after_reload() {
+  log "scenario: codex resume sees post-session config reload"
+  local rec="$ARTIFACT_DIR/record-resume-reload.jsonl"
+  start_mock multiturn "$rec"
+
+  # Config v1: only mocka/chat (mockb/mockr route lines removed; unused
+  # provider entries are valid - every provider has an api_key).
+  local cfg="$ARTIFACT_DIR/config-resume.toml"
+  write_router_config "$cfg" "$(free_port)" "$MOCK_PORT"
+  sed -i '/"mockb\/chat"/d; /"mockr\/resp"/d' "$cfg"
+  start_router "$cfg"
+
+  # Turn 1: session created under v1; codex fetches the v1 catalog and
+  # leaves a models cache that the reload must later invalidate.
+  # NOTE: the user prompt says E2E_RR_T1_OK so record_assert can assert on it;
+  # the mock's assistant message contains E2E_TURN_1_OK (Ruling #1).
+  run_codex -m mocka/chat "Say exactly E2E_RR_T1_OK"
+  grep -qF 'E2E_TURN_1_OK' <<<"$(sed -n '/^codex$/, $p' "$(last_codex_output)")" \
+    || fail "turn 1 marker missing"
+  assert_live_catalog_fetched mocka/chat
+  local cache="$ARTIFACT_DIR/codex-home/models_cache.json"
+  [ -f "$cache" ] || fail "turn 1 must leave a models cache to invalidate"
+
+  # Atomic editor-style edit -> config v2 ADDS mockb/chat (same port; the
+  # daemon is already bound). mv = rename(2) over the config: the exact
+  # save style that killed the old inode-level watch.
+  local cfg_v2="$ARTIFACT_DIR/config-resume-v2.toml"
+  write_router_config "$cfg_v2" "$ROUTER_PORT" "$MOCK_PORT"
+  sed -i '/"mockr\/resp"/d' "$cfg_v2"
+  mv "$cfg_v2" "$cfg"
+
+  # Link 1: the daemon hot-reloads (red on pre-fix code right here).
+  wait_models_route mockb/chat
+  # Link 2: the reload invalidates codex's cache.
+  wait_cache_gone "$cache"
+
+  # The resumed process: refetches the catalog at startup, must resolve
+  # the route that did not exist when the session was created.
+  # NOTE: user prompt E2E_RR_T2_OK for record_assert; mock emits E2E_TURN_2_OK (Ruling #1).
+  run_codex_resume -m mockb/chat "Say exactly E2E_RR_T2_OK"
+  grep -qF 'E2E_TURN_2_OK' <<<"$(sed -n '/^codex$/, $p' "$(last_codex_output)")" \
+    || fail "turn 2 (resume) marker missing"
+  assert_live_catalog_fetched mocka/chat mockb/chat
+
+  # Both turns went to the (chat) upstream; turn 2 replays turn 1 inline.
+  record_assert "$rec" \
+    'len(e) == 2 and e[0]["path"] == "/v1/chat/completions" and e[1]["path"] == "/v1/chat/completions" and "Say exactly E2E_RR_T1_OK" in json.dumps(e[1]["body"])'
+  cleanup_procs
+  pass "resume_after_reload"
+}
+
 scenario_stale_catalog() {
   log "scenario: stale catalog (pin missing a route)"
   local rec="$ARTIFACT_DIR/record-stale.jsonl"
@@ -504,8 +564,8 @@ command -v curl >/dev/null || fail "curl required"
 
 want="${1:-all}"
 case "$want" in
-  basic|models|static|tools|multiturn|cross_format_switch|stale_catalog|doctor_dynamic|doctor_pinned|doctor_fallback|hide_bundled|all) ;;
-  *) fail "unknown scenario: $want (basic|models|static|tools|multiturn|cross_format_switch|stale_catalog|doctor_dynamic|doctor_pinned|doctor_fallback|hide_bundled|all)" ;;
+  basic|models|static|tools|multiturn|cross_format_switch|resume_after_reload|stale_catalog|doctor_dynamic|doctor_pinned|doctor_fallback|hide_bundled|all) ;;
+  *) fail "unknown scenario: $want (basic|models|static|tools|multiturn|cross_format_switch|resume_after_reload|stale_catalog|doctor_dynamic|doctor_pinned|doctor_fallback|hide_bundled|all)" ;;
 esac
 case "$want" in
   basic) scenario_basic ;;
@@ -515,10 +575,11 @@ case "$want" in
   multiturn) scenario_multiturn ;;
   cross_format_switch) scenario_cross_format_switch ;;
   stale_catalog) scenario_stale_catalog ;;
+  resume_after_reload) scenario_resume_after_reload ;;
   doctor_dynamic) scenario_doctor_dynamic ;;
   doctor_pinned) scenario_doctor_pinned ;;
   doctor_fallback) scenario_doctor_fallback ;;
   hide_bundled) scenario_hide_bundled ;;
-  all) scenario_basic; scenario_models; scenario_static; scenario_tools; scenario_multiturn; scenario_cross_format_switch; scenario_stale_catalog; scenario_doctor_dynamic; scenario_doctor_pinned; scenario_doctor_fallback; scenario_hide_bundled ;;
+  all) scenario_basic; scenario_models; scenario_static; scenario_tools; scenario_multiturn; scenario_cross_format_switch; scenario_resume_after_reload; scenario_stale_catalog; scenario_doctor_dynamic; scenario_doctor_pinned; scenario_doctor_fallback; scenario_hide_bundled ;;
 esac
 log "all requested scenarios passed"

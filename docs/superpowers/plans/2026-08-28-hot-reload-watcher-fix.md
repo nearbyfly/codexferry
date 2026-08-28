@@ -2,7 +2,10 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make config hot-reload immune to atomic-rename editor saves by watching the canonicalized config path's parent directory with a filename filter, replacing the inode-level watch that dies permanently on the first file replacement.
+**Goal:** Make config hot-reload immune to atomic-rename editor saves by watching the canonicalized config path's parent directory with a filename filter, replacing the inode-level watch that dies permanently on the first file replacement. Task 4 pins the
+user-visible outcome end-to-end: a codex session created before a config
+change can `resume` afterwards on a route that only exists after the
+change (the 0.148.0-reported case; not a codex regression - spec §Problem).
 
 **Architecture:** `spawn_watcher` resolves the config path through symlinks once at startup, watches the resolved file's parent directory (stable inode across replacements), and filters events by `EventKind::Modify(_) | Create(_)` plus a filename predicate. The parse/ENOENT-retry/applier plumbing is untouched.
 
@@ -472,4 +475,166 @@ Expected: whole suite PASS.
 ```bash
 git add tests/endpoints_metrics.rs AGENTS.md ARCHITECTURE.md
 git commit -m "test(config): symlink-layout hot-reload coverage + watcher docs sync"
+```
+
+---
+
+### Task 4: E2E `resume_after_reload` - the 0.148.0-reported case end-to-end
+
+**Files:**
+- Modify: `scripts/e2e-lib.sh` (start_router forwards CODEX_HOME; two wait helpers)
+- Modify: `scripts/e2e.sh` (new scenario + dispatch/usage registration)
+
+**Interfaces:**
+- Consumes: the fixed watcher (Task 2), `run_codex` / `run_codex_resume` /
+  `assert_live_catalog_fetched` / `write_router_config` (e2e-lib.sh),
+  the reload-side cache invalidation (`invalidate_codex_catalog_cache`,
+  already shipped).
+- Produces: `scenario_resume_after_reload`, helpers `wait_models_route` /
+  `wait_cache_gone`.
+
+**Why a lib change is needed:** `start_router` currently spawns the daemon
+WITHOUT `CODEX_HOME`, so every e2e daemon's reload-side invalidation
+targets the REAL `~/.codex/models_cache.json` (a latent harness bug: e2e
+must never touch the developer's home). Forwarding the scratch
+`$ARTIFACT_DIR/codex-home` fixes that for all scenarios and lets this
+one assert the invalidation against a file it owns.
+
+- [ ] **Step 1: `start_router` forwards CODEX_HOME + two wait helpers**
+
+In `scripts/e2e-lib.sh`, change the daemon invocation inside
+`start_router`:
+
+```bash
+  CODEXFERRY_CONFIG="$1" CODEX_HOME="$ARTIFACT_DIR/codex-home" \
+    "$REPO_ROOT/target/debug/codexferry" \
+    >"$ARTIFACT_DIR/router.log" 2>&1 &
+```
+
+(keep the surrounding cache-clear + ROUTER_PID lines as-is; the
+`rm -f "$ARTIFACT_DIR/codex-home/models_cache.json"` line above it stays).
+Append the helpers (near `wait_healthz`):
+
+```bash
+# Poll the router's live catalog until $1 (route slug) appears; 5s
+# deadline. The failing message names the hot-reload contract because on
+# a deaf watcher this is the red point.
+wait_models_route() { # $1 route slug
+  local deadline=$((SECONDS + 5))
+  until curl -sf "http://127.0.0.1:$ROUTER_PORT/v1/models?client_version=e2e" \
+      | grep -qF "\"$1\""; do
+    [ "$SECONDS" -lt "$deadline" ] || fail "route $1 did not appear in /v1/models within 5s (daemon did not hot-reload)"
+    sleep 0.1
+  done
+}
+
+# Poll until $1 no longer exists; 5s deadline. Deletion happens in the
+# config applier right after the write lock, so it trails the reload by
+# at most a few ms.
+wait_cache_gone() { # $1 file path
+  local deadline=$((SECONDS + 5))
+  while [ -f "$1" ]; do
+    [ "$SECONDS" -lt "$deadline" ] || fail "$1 was not invalidated within 5s (reload missing codex cache invalidation)"
+    sleep 0.05
+  done
+}
+```
+
+- [ ] **Step 2: Write the scenario in `scripts/e2e.sh`**
+
+Insert after `scenario_cross_format_switch` (mirrors its structure; mock
+scenario `multiturn` serves both turns like scenario_multiturn):
+
+```bash
+# Resume-after-reload (2026-08-28 second incident, reported against codex
+# 0.148.0; source-verified NOT a codex regression - the 0.147/0.148 fetch
+# chains are identical, see spec §Problem). A codex session created under
+# config v1 must be able to RESUME and use a route that only exists in
+# config v2 (atomic editor-style save). Codex's catalog is a
+# process-startup snapshot + models_cache.json; the resumed process sees
+# new routes only when the daemon hot-reloads AND the reload invalidates
+# codex's cache so the resume's startup fetch refetches. This scenario
+# pins both links plus the resumed turn itself.
+scenario_resume_after_reload() {
+  log "scenario: codex resume sees post-session config reload"
+  local rec="$ARTIFACT_DIR/record-resume-reload.jsonl"
+  start_mock multiturn "$rec"
+
+  # Config v1: only mocka/chat (mockb/mockr route lines removed; unused
+  # provider entries are valid - every provider has an api_key).
+  local cfg="$ARTIFACT_DIR/config-resume.toml"
+  write_router_config "$cfg" "$(free_port)" "$MOCK_PORT"
+  sed -i '/"mockb\/chat"/d; /"mockr\/resp"/d' "$cfg"
+  start_router "$cfg"
+
+  # Turn 1: session created under v1; codex fetches the v1 catalog and
+  # leaves a models cache that the reload must later invalidate.
+  run_codex -m mocka/chat "Say exactly E2E_RR_T1_OK"
+  grep -qF 'E2E_RR_T1_OK' <<<"$(sed -n '/^codex$/, $p' "$(last_codex_output)")" \
+    || fail "turn 1 marker missing"
+  assert_live_catalog_fetched mocka/chat
+  local cache="$ARTIFACT_DIR/codex-home/models_cache.json"
+  [ -f "$cache" ] || fail "turn 1 must leave a models cache to invalidate"
+
+  # Atomic editor-style edit -> config v2 ADDS mockb/chat (same port; the
+  # daemon is already bound). mv = rename(2) over the config: the exact
+  # save style that killed the old inode-level watch.
+  local cfg_v2="$ARTIFACT_DIR/config-resume-v2.toml"
+  write_router_config "$cfg_v2" "$ROUTER_PORT" "$MOCK_PORT"
+  sed -i '/"mockr\/resp"/d' "$cfg_v2"
+  mv "$cfg_v2" "$cfg"
+
+  # Link 1: the daemon hot-reloads (red on pre-fix code right here).
+  wait_models_route mockb/chat
+  # Link 2: the reload invalidates codex's cache.
+  wait_cache_gone "$cache"
+
+  # The resumed process: refetches the catalog at startup, must resolve
+  # the route that did not exist when the session was created.
+  run_codex_resume -m mockb/chat "Say exactly E2E_RR_T2_OK"
+  grep -qF 'E2E_RR_T2_OK' <<<"$(sed -n '/^codex$/, $p' "$(last_codex_output)")" \
+    || fail "turn 2 (resume) marker missing"
+  assert_live_catalog_fetched mocka/chat mockb/chat
+
+  # Both turns went to the (chat) upstream; turn 2 replays turn 1 inline.
+  record_assert "$rec" '
+    len(e) == 2
+    and e[0]["path"] == "/v1/chat/completions"
+    and e[1]["path"] == "/v1/chat/completions"
+    and "Say exactly E2E_RR_T1_OK" in json.dumps(e[1]["body"])
+  '
+  cleanup_procs
+  pass "resume_after_reload"
+}
+```
+
+Register it (three spots at the bottom of `scripts/e2e.sh`):
+- usage line: add `|resume_after_reload` between `cross_format_switch`
+  and `stale_catalog`;
+- the `want` validation `case`: add `resume_after_reload) ;;` arm;
+- dispatch: `resume_after_reload) scenario_resume_after_reload ;;` and
+  append `scenario_resume_after_reload;` to the `all` chain right after
+  `scenario_cross_format_switch;`.
+
+- [ ] **Step 3: Run the scenario (red on pre-fix code)**
+
+Before Task 2 (or on a pre-fix checkout): `scripts/e2e.sh resume_after_reload`
+Expected: FAIL - "route mockb/chat did not appear in /v1/models within 5s
+(daemon did not hot-reload)" - the atomic `mv` killed the inode watch.
+
+After Tasks 1-3: Expected: PASS end-to-end (turn-1 marker, route appears,
+cache invalidated, resumed turn-2 marker, cache refetched with both
+routes, record shape).
+
+- [ ] **Step 4: Full e2e regression (CODEX_HOME forwarding touched every scenario)**
+
+Run: `scripts/e2e.sh all`
+Expected: PASS - the `start_router` CODEX_HOME change affects all
+scenarios, so the whole ladder must be re-run, not just the new one.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add scripts/e2e-lib.sh scripts/e2e.sh
+git commit -m "test(e2e): resume-after-reload scenario + forward CODEX_HOME to the daemon"
 ```

@@ -94,6 +94,13 @@ blocking `write()` from the notify callback itself - it would stall the
 notify thread behind every in-flight request. The channel indirection keeps
 the notify thread free while guaranteeing delivery.
 
+The watcher itself binds to the canonicalized config path's PARENT
+directory with a filename filter — an inode-level file watch would die
+permanently on the first atomic-rename editor save (IN_IGNORED, no
+re-arm); the symlink is resolved once at startup, so re-pointing it
+requires a daemon restart (see
+`docs/superpowers/specs/2026-08-28-hot-reload-watcher-fix-design.md`).
+
 ### 8. Tool calls are accumulated during streaming, emitted at stream end
 
 Streaming tool calls arrive as deltas keyed by `index`. The `StreamConverter`
@@ -287,7 +294,13 @@ Codex CLI ──POST /v1/responses──▶ axum daemon (127.0.0.1:8787)
   topical binaries (`chat_conversion.rs`, `passthrough.rs`, `healing.rs`,
   `sessions.rs`, `endpoints_metrics.rs`), each spawning the real binary as a
   subprocess against a mock axum upstream. They use `CARGO_BIN_EXE_codexferry`
-  and poll `/healthz` before making assertions.
+  and poll `/healthz` before making assertions. Tests that trigger a hot reload
+  must pin `CODEX_HOME` to a subdir of the test's `TempDir` (e.g.
+  `.env("CODEX_HOME", dir.path().join("codex-home"))`) so the reload applier's
+  `invalidate_codex_catalog_cache()` cannot reach the developer's real
+  `~/.codex/models_cache.json` (raises on issue raised in code review of the
+  hot-reload-watcher-fix PR, PR #5; pre-existing pattern that PR also fixed
+  for the e2e harness in `scripts/e2e-lib.sh:107`).
 
 - **E2E scripts** (`scripts/e2e.sh`, `scripts/e2e-real.sh`) drive the real
   Codex CLI against a scripted mock (`src/bin/e2e-mock.rs`) or real upstreams.
