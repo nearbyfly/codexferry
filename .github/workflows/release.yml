@@ -1,0 +1,41 @@
+# Release binary build: on every v* tag push, build the linux x86_64
+# release binary and attach it (plus SHA256SUMS) to the GitHub Release.
+#
+# The tag is pushed by scripts/release.sh, which also creates the Release
+# object with the curated CHANGELOG body seconds later — the build takes
+# minutes, so by upload time the release exists and
+# softprops/action-gh-release attaches to it. For a tag WITHOUT an existing
+# release object (e.g. a one-off test tag) the action creates one instead.
+#
+# First live run: the first release whose tag contains this file
+# (v0.1.3's tag predates it). workflow_dispatch is enabled for manual
+# re-runs against any ref that carries the workflow.
+name: release-build
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux-x86_64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release
+      - name: Package
+        run: |
+          tar czf "codexferry-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz" \
+              -C target/release codexferry
+          sha256sum codexferry-*.tar.gz > SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            codexferry-*.tar.gz
+            SHA256SUMS
