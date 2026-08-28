@@ -26,6 +26,29 @@ wait_healthz() { # $1 = base url
   done
   fail "router did not become healthy at $1"
 }
+# Poll the router's live catalog until $1 (route slug) appears; 5s
+# deadline. The failing message names the hot-reload contract because on
+# a deaf watcher this is the red point.
+wait_models_route() { # $1 route slug
+  local deadline=$((SECONDS + 5))
+  until curl -sf "http://127.0.0.1:$ROUTER_PORT/v1/models?client_version=e2e" \
+      | grep -qF "\"$1\""; do
+    [ "$SECONDS" -lt "$deadline" ] || fail "route $1 did not appear in /v1/models within 5s (daemon did not hot-reload)"
+    sleep 0.1
+  done
+}
+
+# Poll until $1 no longer exists; 5s deadline. Deletion happens in the
+# config applier right after the write lock, so it trails the reload by
+# at most a few ms.
+wait_cache_gone() { # $1 file path
+  local deadline=$((SECONDS + 5))
+  while [ -f "$1" ]; do
+    [ "$SECONDS" -lt "$deadline" ] || fail "$1 was not invalidated within 5s (reload missing codex cache invalidation)"
+    sleep 0.05
+  done
+}
+
 
 # Temp router config: three routes over one mock instance. mocka/mockb are
 # distinct providers so a mid-session switch stays cross-provider. $4 is an
@@ -81,7 +104,8 @@ start_router() { # $1 config path — sets ROUTER_PORT/ROUTER_PID
   # next scenario's run_codex skip the /models fetch entirely and false-green
   # the live-catalog assertions (scenario_models). Clear it per router start.
   rm -f "$ARTIFACT_DIR/codex-home/models_cache.json"
-  CODEXFERRY_CONFIG="$1" "$REPO_ROOT/target/debug/codexferry" \
+  CODEXFERRY_CONFIG="$1" CODEX_HOME="$ARTIFACT_DIR/codex-home" \
+    "$REPO_ROOT/target/debug/codexferry" \
     >"$ARTIFACT_DIR/router.log" 2>&1 &
   ROUTER_PID=$!
   wait_healthz "http://127.0.0.1:$ROUTER_PORT"
