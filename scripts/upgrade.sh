@@ -25,7 +25,9 @@ BIN_DIR="${CODEXFERRY_BIN_DIR:-$HOME/bin}"
 SERVICE="${CODEXFERRY_SERVICE:-codexferry}"
 HEALTHZ="${CODEXFERRY_HEALTHZ_URL:-http://127.0.0.1:8787/healthz}"
 
-log()  { printf '[upgrade] %s\n' "$*"; }
+# Logs go to stderr: download_artifact's output is command-substituted,
+# and stdout must carry only the artifact path.
+log()  { printf '[upgrade] %s\n' "$*" >&2; }
 fail() { printf '[FAIL] %s\n' "$*" >&2; exit 1; }
 usage() { sed -n '3,/^$/p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
 
@@ -82,7 +84,7 @@ download_artifact() { # $1 = tag (with v)
   gh release download "$tag" -R "$REPO" -p "$tarball" -O "$dir/$tarball" \
     || fail "download failed for $tarball (releases carry built artifacts since the CI workflow landed)"
   if gh release download "$tag" -R "$REPO" -p SHA256SUMS -O "$dir/SHA256SUMS" 2>/dev/null; then
-    (cd "$dir" && grep " ${tarball}\$" SHA256SUMS | sha256sum -c -) \
+    (cd "$dir" && grep " ${tarball}\$" SHA256SUMS | sha256sum -c - >/dev/null) \
       || fail "sha256 mismatch for $tarball"
     log "sha256 verified"
   else
