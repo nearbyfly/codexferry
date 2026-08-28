@@ -58,16 +58,22 @@ git pull --ff-only
 cargo build && cargo test
 scripts/e2e.sh all
 
-# 2. Dry-run first (sees what would happen, no network).
+# 2. Prepare the CHANGELOG.md entry: draft a grouped section from the
+#    commits since the last tag, curate it into user-facing bullets, and
+#    commit it to main (BEFORE cutting the release, so both remotes get it).
+scripts/release.sh v0.1.4 --prep-changelog   # prints the draft
+#    -> paste under the CHANGELOG.md header, curate, git commit
+
+# 3. Dry-run first (sees what would happen, no network).
 scripts/release.sh v0.1.1 --dry-run
 
-# 3. Real run. Use --bump-cargo when Cargo.toml and the tag should
+# 4. Real run. Use --bump-cargo when Cargo.toml and the tag should
 #    move together; skip when you want to publish source-only with an
 #    unchanged Cargo.toml (rare).
 scripts/release.sh v0.1.1 --bump-cargo
 
-# 4. Verify on github.com/nearbyfly/codexferry/releases that the release
-#    exists and the changelog body was populated.
+# 5. Verify on github.com/nearbyfly/codexferry/releases that the release
+#    exists and its body carries the curated CHANGELOG section.
 ```
 
 ## Why `docs/` is stripped from the GitHub mirror

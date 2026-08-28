@@ -213,12 +213,16 @@ support `If-None-Match` → `304 Not Modified`.
   --bundled` so Codex's dynamic-mode slug merge hides its bundled GPT models;
   see `docs/superpowers/specs/2026-08-26-hide-bundled-models-design.md`.
 
-### 13. Keep the three top-level MD docs in sync
+### 13. Keep the top-level MD docs in sync
 
-`README.md` (user guide), `ARCHITECTURE.md` (design, incl. §11 line counts and
-test counts), and this file describe the current codebase. When making
-significant changes, update the relevant docs in the same change — especially
-`ARCHITECTURE.md` §11, which lists per-file line counts.
+`README.md` (user guide), `README-DETAILS.md` (deep config/endpoint
+reference), `ARCHITECTURE.md` (design, incl. §11 line counts and test
+counts), `CHANGELOG.md` (per-release changes — the new version's section
+is drafted with `scripts/release.sh vX.Y.Z --prep-changelog`, curated, and
+committed to main BEFORE the release is cut), and this file describe the
+current codebase. When making significant changes, update the relevant
+docs in the same change — especially `ARCHITECTURE.md` §11, which lists
+per-file line counts.
 
 ### 13. Namespaced tool calls decode via the map, never by splitting on `-`
 
