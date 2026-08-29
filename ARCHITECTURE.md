@@ -367,7 +367,7 @@ codexferry/
 │   │   └── responses_healer_tests.rs  # responses healer unit tests (496)
 │   ├── session.rs          # SessionStore (340)
 │   ├── upstream.rs         # SSE parser + key resolution (623)
-│   ├── catalog.rs          # gen-catalog + build_catalog_value + bundled-model hide-override discovery (1,191)
+│   ├── catalog.rs          # gen-catalog + build_catalog_value + bundled-model hide-override discovery (1,198)
 │   ├── models_cache.rs     # CatalogCache: route-fingerprint + template-mtime invalidation for live /models; and, when `hide_bundled_models` is on, re-probes `codex debug models --bundled` on the same 60s cadence (659)
 │   ├── logging.rs          # tracing init (36)
 │   ├── metrics.rs          # Prometheus metrics registry + /metrics encoding (369)
