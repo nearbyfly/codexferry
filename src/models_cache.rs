@@ -116,8 +116,22 @@ impl CatalogCache {
             self.stale_entry()
         } else if let Ok(_guard) = self.refreshing.try_lock() {
             // Cold start, we are first: refresh inline while holding the
-            // single-flight lock.
+            // single-flight lock. If the fingerprint guard discards (config
+            // changed mid-refresh), fall through to the wait-branch's
+            // defense — do not panic the request handler.
             self.refresh(config).await;
+            if self.inner.lock().unwrap().is_none() {
+                // Mirror the wait-branch's structure: drop our single-
+                // flight lock, re-acquire to wait for any concurrent
+                // refresher, retry fast_hit, refresh inline if still
+                // absent.
+                drop(_guard);
+                let _wait_guard = self.refreshing.lock().await;
+                if let Some(hit) = self.fast_hit(fingerprint_config(&*config.read().await)) {
+                    return hit;
+                }
+                self.refresh(config).await;
+            }
             self.stale_entry()
         } else {
             // Cold start, someone else is refreshing: wait for them, then

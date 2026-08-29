@@ -396,6 +396,6 @@ codexferry/
 > Line counts are approximate and include comments; they drift as the code evolves.
 > Update them when making significant changes.
 
-~23,684 lines total across the scripts/, src/ and tests/ files above. 434 tests
-(392 unit + 5 e2e-mock unit + 36 integration passing + 1 ignored live-probe
+~23,684 lines total across the scripts/, src/ and tests/ files above. 442 tests
+(398 unit + 5 e2e-mock unit + 38 integration passing + 1 ignored live-probe
 test).
