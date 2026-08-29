@@ -411,8 +411,7 @@ async fn handle_models(
             observe_client_version(&state, &v);
 
             // Codex ModelsResponse catalog shape (live model catalog).
-            let (etag, body) = state.models.get(&config);
-            drop(config);
+            let (etag, body) = state.models.get(&state.config).await;
 
             if let Some(if_none) = headers.get("if-none-match").and_then(|v| v.to_str().ok()) {
                 if etag_matches(if_none, &etag) {

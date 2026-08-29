@@ -75,61 +75,73 @@ impl CatalogCache {
         }
     }
 
-    /// Return `(etag, body)`, rebuilding when the route fingerprint or the
-    /// template file mtime changed. Never fails; template load errors
-    /// degrade to the from-scratch catalog with a warning log.
-    pub fn get(
-        &self,
-        config: &tokio::sync::RwLockReadGuard<'_, ValidatedConfig>,
-    ) -> (String, Bytes) {
-        let fingerprint = fingerprint_config(config);
-
-        // Fast path: reuse the cached body when neither the routes nor the
-        // template file changed. The template_path from the previous call is
-        // also what we stat; if the template was served by `codex debug
-        // models` (no file), mtime is always None. Freshness is kept by the
-        // re-probe cadence below (recheck_due) plus the fingerprint.
-        let cached_hit = {
-            let inner = self.inner.lock().unwrap();
-            inner.as_ref().and_then(|cached| {
-                let template_mtime = cached.template_path.as_ref().and_then(file_mtime);
-                let recheck_due = cached.checked_at.elapsed() >= TEMPLATE_RECHECK_INTERVAL
-                    && (cached.template_path.is_none() || cached.hide_bundled);
-                if cached.fingerprint == fingerprint
-                    && cached.template_mtime == template_mtime
-                    && !recheck_due
-                {
-                    Some((cached.etag.clone(), cached.body.clone()))
-                } else {
-                    None
-                }
-            })
+    /// Return `(etag, body)`. Fast path: pure memory. Miss/expired: an
+    /// inline rebuild from a config SNAPSHOT — the read guard is dropped
+    /// before any subprocess call, so the config applier's write lock is
+    /// never queued behind discovery (spec §Problem). NOTE: in this
+    /// interim form the rebuild still blocks the worker; Task 2 moves it
+    /// to a background task.
+    pub async fn get(&self, config: &crate::config::SharedConfig) -> (String, Bytes) {
+        let (fingerprint, snapshot) = {
+            let guard = config.read().await;
+            (fingerprint_config(&guard), guard.clone())
         };
-        if let Some(hit) = cached_hit {
+        if let Some(hit) = self.fast_hit(fingerprint) {
             return hit;
         }
+        self.rebuild_inline(fingerprint, &snapshot);
+        self.stale_entry()
+    }
 
-        // Slow path: reload the template (same discovery as gen-catalog),
-        // rebuild the catalog, and store the result.
+    /// Fast-path check: cached entry fresh under this fingerprint and the
+    /// template-mtime / recheck conditions. Pure memory, std-Mutex only.
+    fn fast_hit(&self, fingerprint: u64) -> Option<(String, Bytes)> {
+        let inner = self.inner.lock().unwrap();
+        inner.as_ref().and_then(|cached| {
+            let template_mtime = cached.template_path.as_ref().and_then(file_mtime);
+            let recheck_due = cached.checked_at.elapsed() >= TEMPLATE_RECHECK_INTERVAL
+                && (cached.template_path.is_none() || cached.hide_bundled);
+            if cached.fingerprint == fingerprint
+                && cached.template_mtime == template_mtime
+                && !recheck_due
+            {
+                Some((cached.etag.clone(), cached.body.clone()))
+            } else {
+                None
+            }
+        })
+    }
+
+    /// The cached entry as `(etag, body)`. Only called on paths that have
+    /// just stored an entry.
+    fn stale_entry(&self) -> (String, Bytes) {
+        self.inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|c| (c.etag.clone(), c.body.clone()))
+            .expect("stale/cold path requires a cached entry after rebuild")
+    }
+
+    /// Inline rebuild (Task 1 interim form; Task 2 replaces this with the
+    /// background `refresh`). Blocking; caller must not hold any config
+    /// guard (spec §Design).
+    fn rebuild_inline(&self, fingerprint: u64, snapshot: &ValidatedConfig) {
         let (template_path, template) = crate::catalog::reload_template();
         let template_mtime = template_path.as_ref().and_then(file_mtime);
-        let mut generated = crate::catalog::build_catalog_value(config, template.as_ref());
-        // Hide overrides: dynamic-mode only, opt-in. gen-catalog never runs
-        // this code (spec §Decisions 1-2).
-        let hide_bundled = config.server.hide_bundled_models;
+        let mut generated = crate::catalog::build_catalog_value(snapshot, template.as_ref());
+        let hide_bundled = snapshot.server.hide_bundled_models;
         if hide_bundled {
             let bundled = (self.discovery)();
             if bundled.is_empty() {
                 tracing::warn!(
-                    "hide_bundled_models is on but `codex debug models --bundled` returned no models; Codex's bundled models stay visible"
+                    "hide_bundled_models is on but `codex debug models --bundled` \
+                     returned no models; Codex's bundled models stay visible"
                 );
             } else {
                 let route_keys: std::collections::HashSet<&str> =
-                    config.routes.keys().map(String::as_str).collect();
+                    snapshot.routes.keys().map(String::as_str).collect();
                 let entries = crate::catalog::build_hide_entries(&bundled, &route_keys);
-                // build_catalog_value always emits a `models` array; the
-                // assert documents the invariant (no panic risk).
-                debug_assert!(generated.catalog["models"].is_array());
                 if let Some(models) = generated.catalog["models"].as_array_mut() {
                     models.extend(entries);
                 }
@@ -139,7 +151,7 @@ impl CatalogCache {
             .map(Bytes::from)
             .unwrap_or_default();
         let etag = etag_for(fingerprint, &body);
-        let cached = Cached {
+        *self.inner.lock().unwrap() = Some(Cached {
             body: body.clone(),
             etag: etag.clone(),
             fingerprint,
@@ -147,9 +159,7 @@ impl CatalogCache {
             template_mtime,
             checked_at: Instant::now(),
             hide_bundled,
-        };
-        *self.inner.lock().unwrap() = Some(cached);
-        (etag, body)
+        });
     }
 }
 
@@ -229,9 +239,8 @@ context_window = 1000
     async fn stable_etag_and_body_when_nothing_changes() {
         let cfg = Arc::new(RwLock::new(config_with_route("ds/a")));
         let cache = CatalogCache::new();
-        let guard = cfg.read().await;
-        let (etag1, body1) = cache.get(&guard);
-        let (etag2, body2) = cache.get(&guard);
+        let (etag1, body1) = cache.get(&cfg).await;
+        let (etag2, body2) = cache.get(&cfg).await;
         assert_eq!(etag1, etag2);
         assert_eq!(body1, body2);
     }
@@ -240,9 +249,9 @@ context_window = 1000
     async fn route_change_invalidates() {
         let cfg = Arc::new(RwLock::new(config_with_route("ds/a")));
         let cache = CatalogCache::new();
-        let (etag1, body1) = cache.get(&cfg.read().await);
+        let (etag1, body1) = cache.get(&cfg).await;
         *cfg.write().await = config_with_route("ds/b");
-        let (etag2, body2) = cache.get(&cfg.read().await);
+        let (etag2, body2) = cache.get(&cfg).await;
         assert_ne!(etag1, etag2);
         assert!(body2.windows(4).any(|w| w == b"ds/b"));
         assert!(!body1.windows(4).any(|w| w == b"ds/b"));
@@ -254,14 +263,14 @@ context_window = 1000
         // so the fast path cannot rely on mtime and must re-discover periodically.
         let cfg = Arc::new(RwLock::new(config_with_route("ds/a")));
         let cache = CatalogCache::new();
-        let _ = cache.get(&cfg.read().await);
+        let _ = cache.get(&cfg).await;
 
         // Fresh entry: a second get with the same fingerprint is a fast-path hit.
         let fresh_checked_at = {
             let inner = cache.inner.lock().unwrap();
             inner.as_ref().unwrap().checked_at
         };
-        let _ = cache.get(&cfg.read().await);
+        let _ = cache.get(&cfg).await;
         let after_fast_path = {
             let inner = cache.inner.lock().unwrap();
             inner.as_ref().unwrap().checked_at
@@ -274,7 +283,7 @@ context_window = 1000
             let cached = inner.as_mut().unwrap();
             cached.checked_at = std::time::Instant::now() - (std::time::Duration::from_secs(61));
         }
-        let _ = cache.get(&cfg.read().await);
+        let _ = cache.get(&cfg).await;
         let rebuilt_checked_at = {
             let inner = cache.inner.lock().unwrap();
             inner.as_ref().unwrap().checked_at
@@ -314,7 +323,7 @@ context_window = 1000
             inner: Mutex::new(None),
             discovery: counting,
         };
-        let (_, body) = cache.get(&cfg.read().await);
+        let (_, body) = cache.get(&cfg).await;
         assert!(
             !body.windows(10).any(|w| w == b"gpt-marker"),
             "flag off must not append hide entries"
@@ -333,7 +342,7 @@ context_window = 1000
             inner: Mutex::new(None),
             discovery: marker_discovery,
         };
-        let (etag, body) = cache.get(&cfg.read().await);
+        let (etag, body) = cache.get(&cfg).await;
         let v: Value = serde_json::from_slice(&body).unwrap();
         let models = v["models"].as_array().expect("models array");
         let marker = models
@@ -357,9 +366,9 @@ context_window = 1000
             inner: Mutex::new(None),
             discovery: marker_discovery,
         };
-        let (etag1, body1) = cache.get(&cfg.read().await);
+        let (etag1, body1) = cache.get(&cfg).await;
         *cfg.write().await = config_with_flag("ds/a", true);
-        let (etag2, body2) = cache.get(&cfg.read().await);
+        let (etag2, body2) = cache.get(&cfg).await;
         assert_ne!(etag1, etag2, "flag toggle must invalidate the cache");
         assert!(!body1.windows(10).any(|w| w == b"gpt-marker"));
         assert!(body2.windows(10).any(|w| w == b"gpt-marker"));
@@ -380,7 +389,7 @@ context_window = 1000
             inner: Mutex::new(None),
             discovery: counting,
         };
-        let _ = cache.get(&cfg.read().await);
+        let _ = cache.get(&cfg).await;
         {
             let mut inner = cache.inner.lock().unwrap();
             let cached = inner.as_mut().unwrap();
@@ -395,7 +404,7 @@ context_window = 1000
             cached.checked_at =
                 std::time::Instant::now() - (TEMPLATE_RECHECK_INTERVAL + Duration::from_secs(1));
         }
-        let _ = cache.get(&cfg.read().await);
+        let _ = cache.get(&cfg).await;
         assert_eq!(
             CALLS.load(std::sync::atomic::Ordering::SeqCst),
             2,
