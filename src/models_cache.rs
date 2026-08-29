@@ -5,6 +5,12 @@
 //! hot-reload and the codex template file can change on disk. This module
 //! keeps the serialized `{"models": [...]}` body plus an ETag, invalidating
 //! when the route fingerprint or the template file's mtime changes.
+//!
+//! Stale-while-revalidate (spec §Goal): a fresh hit is served from memory
+//! without any subprocess; a stale entry is returned immediately while a
+//! single-flight background refresh updates the cache; a cold start
+//! refreshes inline or waits for an in-flight refresh so a freshly-started
+//! daemon always answers correctly.
 
 use crate::config::ValidatedConfig;
 use bytes::Bytes;
@@ -56,10 +62,14 @@ struct Cached {
 
 /// Cache for the live `/models` catalog endpoint.
 ///
-/// The cache is intentionally cheap and synchronous: `get` never awaits
-/// inside the mutex, and a template reload failure degrades to the
-/// from-scratch catalog (the `/models` endpoint must never fail the request
-/// because the installed Codex template is temporarily unreadable).
+/// The cache implements stale-while-revalidate (SWR): a fresh hit is served
+/// from memory without any subprocess; a stale entry is returned immediately
+/// while a single-flight background refresh updates the cache; a cold start
+/// refreshes inline or waits for an in-flight refresh so a freshly-started
+/// daemon always answers correctly (spec §Design). A template reload failure
+/// degrades to the from-scratch catalog (the `/models` endpoint must never
+/// fail the request because the installed Codex template is temporarily
+/// unreadable).
 pub struct CatalogCache {
     inner: Mutex<Option<Cached>>,
     /// Single-flight gate for background refreshes: try_lock decides
@@ -503,7 +513,7 @@ context_window = 1000
             discovery: gated,
         });
         let (etag1, _) = cache.get(&cfg).await; // cold: fresh build (gate open)
-        // Fingerprint change -> stale; close the gate so refresh cannot finish.
+                                                // Fingerprint change -> stale; close the gate so refresh cannot finish.
         GATE.store(false, std::sync::atomic::Ordering::SeqCst);
         *cfg.write().await = config_with_flag("ds/b", true);
         let start = std::time::Instant::now();
@@ -585,16 +595,16 @@ context_window = 1000
         GATE.store(false, std::sync::atomic::Ordering::SeqCst);
         *cfg.write().await = config_with_flag("ds/b", true); // triggers refresh #1
         let _ = cache.get(&cfg).await; // spawns refresh (gated)
-        // Yield so the spawned task polls and reads the config snapshot
-        // (ds/b) BEFORE the test's mid-refresh write; under current_thread
-        // the spawned task is not polled between the spawn and this yield.
+                                       // Yield so the spawned task polls and reads the config snapshot
+                                       // (ds/b) BEFORE the test's mid-refresh write; under current_thread
+                                       // the spawned task is not polled between the spawn and this yield.
         tokio::task::yield_now().await;
         *cfg.write().await = config_with_flag("ds/c", true); // mid-refresh change
         GATE.store(true, std::sync::atomic::Ordering::SeqCst);
         tokio::time::sleep(Duration::from_millis(100)).await;
         let _ = cache.refreshing.lock().await; // refresh #1 completes -> discarded
-        // Entry still holds ds/a; this get returns stale and triggers
-        // refresh #2 (gate now open, completes fast).
+                                               // Entry still holds ds/a; this get returns stale and triggers
+                                               // refresh #2 (gate now open, completes fast).
         let (etag_stale, _) = cache.get(&cfg).await;
         assert_eq!(
             etag_stale, etag1,
