@@ -402,15 +402,18 @@ async fn handle_models(
     Query(q): Query<ModelsQuery>,
     headers: HeaderMap,
 ) -> Response {
-    let config = state.config.read().await;
-
     match q.client_version {
         Some(v) => {
             // Runs before the If-None-Match short-circuit below so a 304
             // revalidation still observes the version.
             observe_client_version(&state, &v);
 
-            // Codex ModelsResponse catalog shape (live model catalog).
+            // Codex ModelsResponse catalog shape (live model catalog). No
+            // config read guard is held here: get() takes its own short
+            // guards internally, and an outer guard kept alive across the
+            // await can circular-wait with the hot-reload applier's write
+            // lock (tokio RwLock is write-preferring) - PR #6 review
+            // issue 1.
             let (etag, body) = state.models.get(&state.config).await;
 
             if let Some(if_none) = headers.get("if-none-match").and_then(|v| v.to_str().ok()) {
@@ -431,6 +434,9 @@ async fn handle_models(
         }
         None => {
             // Chat-Completions list shape (same body as before, but now with ETag + 304).
+            // This branch reads the config directly, so it takes (and
+            // releases) its own guard.
+            let config = state.config.read().await;
             let mut keys: Vec<&String> = config.routes.keys().collect();
             keys.sort();
             let data: Vec<Value> = keys

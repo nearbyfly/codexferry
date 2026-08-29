@@ -348,7 +348,7 @@ codexferry/
 │   ├── mode.rs             # codex wiring mode detection: pinned/dynamic/fallback (191)
 │   ├── version.rs          # codex client-version tripwire (`CodexVersionTracker`) + doctor state (383)
 │   ├── proxy/
-│   │   ├── mod.rs             # axum routing + dispatch + client-version observation (835)
+│   │   ├── mod.rs             # axum routing + dispatch + client-version observation (841)
 │   │   ├── chat.rs            # chat-format handler (515)
 │   │   ├── passthrough.rs     # responses-format relay (472)
 │   │   ├── upstream.rs        # send_upstream + error-class dedup helpers (150)
@@ -368,7 +368,7 @@ codexferry/
 │   ├── session.rs          # SessionStore (340)
 │   ├── upstream.rs         # SSE parser + key resolution (623)
 │   ├── catalog.rs          # gen-catalog + build_catalog_value + bundled-model hide-override discovery (1,198)
-│   ├── models_cache.rs     # CatalogCache: route-fingerprint + template-mtime invalidation for live /models; and, when `hide_bundled_models` is on, re-probes `codex debug models --bundled` on the same 60s cadence (659)
+│   ├── models_cache.rs     # CatalogCache: route-fingerprint + template-mtime invalidation for live /models; and, when `hide_bundled_models` is on, re-probes `codex debug models --bundled` on the same 60s cadence (739)
 │   ├── logging.rs          # tracing init (36)
 │   ├── metrics.rs          # Prometheus metrics registry + /metrics encoding (369)
 │   ├── normalize.rs        # boundary normalization (hoist, namespace flatten + chat-name encode/decode map, unknown-type visibility) (452)

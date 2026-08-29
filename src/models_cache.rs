@@ -90,13 +90,18 @@ impl CatalogCache {
         }
     }
 
-    /// Return `(etag, body)`, never blocking on a subprocess on the request
-    /// path and never holding a config guard across one (spec §Goal).
+    /// Return `(etag, body)` without holding a config guard across a
+    /// subprocess call and without blocking the request on one except at
+    /// cold start (spec §Goal).
     /// - fast path: fresh cache hit;
     /// - stale path: return the old entry, spawn a single-flight background
     ///   refresh;
-    /// - cold start (no entry): refresh inline, or WAIT for an in-flight
-    ///   refresh (a daemon that just started must answer correctly).
+    /// - cold start (no entry): an entry MUST exist when we leave. Win or
+    ///   wait for the single-flight lock, then refresh, retrying with a
+    ///   FORCED store when the fingerprint guard discards repeated
+    ///   mid-refresh config writes (one possibly one-request-stale entry
+    ///   beats a panicking handler; the next request's fingerprint check
+    ///   re-triggers a fresh refresh).
     pub async fn get(self: &Arc<Self>, config: &crate::config::SharedConfig) -> (String, Bytes) {
         let fingerprint = fingerprint_config(&*config.read().await);
         if let Some(hit) = self.fast_hit(fingerprint) {
@@ -110,39 +115,33 @@ impl CatalogCache {
             let config = Arc::clone(config);
             tokio::spawn(async move {
                 if let Ok(_guard) = cache.refreshing.try_lock() {
-                    cache.refresh(&config).await;
+                    cache.refresh(&config, false).await;
                 }
             });
-            self.stale_entry()
-        } else if let Ok(_guard) = self.refreshing.try_lock() {
-            // Cold start, we are first: refresh inline while holding the
-            // single-flight lock. If the fingerprint guard discards (config
-            // changed mid-refresh), fall through to the wait-branch's
-            // defense — do not panic the request handler.
-            self.refresh(config).await;
-            if self.inner.lock().unwrap().is_none() {
-                // Mirror the wait-branch's structure: drop our single-
-                // flight lock, re-acquire to wait for any concurrent
-                // refresher, retry fast_hit, refresh inline if still
-                // absent.
-                drop(_guard);
-                let _wait_guard = self.refreshing.lock().await;
-                if let Some(hit) = self.fast_hit(fingerprint_config(&*config.read().await)) {
-                    return hit;
-                }
-                self.refresh(config).await;
-            }
-            self.stale_entry()
+            self.stale_hit()
+                .expect("stale path checked inner.is_some(); nothing ever clears it")
         } else {
-            // Cold start, someone else is refreshing: wait for them, then
-            // serve their entry — or refresh ourselves if theirs failed to
-            // produce one (spec §Cold start).
-            let _guard = self.refreshing.lock().await;
-            if let Some(hit) = self.fast_hit(fingerprint_config(&*config.read().await)) {
+            // Cold start (no entry): there is no stale body to serve, so the
+            // request must end with a fresh entry. Win the single-flight
+            // lock or wait for the current holder, then refresh. A refresh
+            // is DISCARDED when a config write lands mid-refresh (fingerprint
+            // guard); retry, and force the store on every retry after the
+            // first so the loop always terminates (PR #6 review issue 2).
+            let _guard = match self.refreshing.try_lock() {
+                Ok(guard) => guard,
+                Err(_) => self.refreshing.lock().await,
+            };
+            if let Some(hit) = self.stale_hit() {
                 return hit;
             }
-            self.refresh(config).await;
-            self.stale_entry()
+            let mut force = false;
+            loop {
+                self.refresh(config, force).await;
+                if let Some(hit) = self.stale_hit() {
+                    return hit;
+                }
+                force = true;
+            }
         }
     }
 
@@ -165,15 +164,13 @@ impl CatalogCache {
         })
     }
 
-    /// The cached entry as `(etag, body)`. Only called on paths that have
-    /// just stored an entry.
-    fn stale_entry(&self) -> (String, Bytes) {
+    /// The cached entry as `(etag, body)`, if one exists.
+    fn stale_hit(&self) -> Option<(String, Bytes)> {
         self.inner
             .lock()
             .unwrap()
             .as_ref()
             .map(|c| (c.etag.clone(), c.body.clone()))
-            .expect("stale/cold path requires a cached entry after rebuild")
     }
 
     /// One refresh run: read the CURRENT config, join the two subprocess
@@ -181,7 +178,9 @@ impl CatalogCache {
     /// not changed since the read (fingerprint guard, spec §Design step 4).
     /// Subprocess failures degrade inside the rebuild exactly as the inline
     /// path always did and the result IS stored (spec §Design step 5).
-    async fn refresh(&self, config: &crate::config::SharedConfig) {
+    /// `force` skips the fingerprint guard — the cold-start last resort so
+    /// an entry always exists (PR #6 review issue 2).
+    async fn refresh(&self, config: &crate::config::SharedConfig, force: bool) {
         let (fingerprint, snapshot) = {
             let guard = config.read().await;
             (fingerprint_config(&guard), guard.clone())
@@ -225,7 +224,7 @@ impl CatalogCache {
             .map(Bytes::from)
             .unwrap_or_default();
         let etag = etag_for(fingerprint, &body);
-        if fingerprint_config(&*config.read().await) != fingerprint {
+        if !force && fingerprint_config(&*config.read().await) != fingerprint {
             return;
         }
         *self.inner.lock().unwrap() = Some(Cached {
@@ -669,5 +668,71 @@ context_window = 1000
         let (_, body2) = second.await;
         assert!(body2.windows(4).any(|w| w == b"ds/a"));
         let _ = first.await.unwrap();
+    }
+    #[tokio::test]
+    /// Review-fix regression (PR #6 review issue 2): a cold start whose
+    /// EVERY refresh is discarded by the fingerprint guard (config written
+    /// mid-refresh, repeatedly) must still answer - the retry falls back to
+    /// a FORCED store instead of hitting stale_entry's expect panic.
+    async fn cold_start_survives_repeated_mid_refresh_config_writes() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        // Token gate: every discovery call blocks until the harness
+        // releases exactly this call, so config writes land
+        // deterministically mid-refresh.
+        static GATE: AtomicBool = AtomicBool::new(false);
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        fn token_gated() -> Vec<Value> {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            while !GATE.swap(false, Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            marker_discovery()
+        }
+        async fn release_with_flip(
+            cfg: &Arc<RwLock<crate::config::ValidatedConfig>>,
+            n: usize,
+            route: &str,
+        ) {
+            while CALLS.load(Ordering::SeqCst) < n {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            *cfg.write().await = config_with_flag(route, true);
+            GATE.store(true, Ordering::SeqCst);
+        }
+
+        let cfg = Arc::new(RwLock::new(config_with_flag("ds/a", true)));
+        let cache = Arc::new(CatalogCache {
+            inner: Mutex::new(None),
+            refreshing: Default::default(),
+            discovery: token_gated,
+        });
+        let getter = tokio::spawn({
+            let c = Arc::clone(&cache);
+            let cfg2 = Arc::clone(&cfg);
+            async move { c.get(&cfg2).await }
+        });
+        // refresh #1 (ds/a) is discarded by the ds/b write mid-refresh ...
+        release_with_flip(&cfg, 1, "ds/b").await;
+        // ... and refresh #2 (ds/b) ALSO races a config write (ds/c lands
+        // mid-refresh): the retry is FORCED, so it stores the ds/b snapshot
+        // and the getter answers instead of panicking (pre-fix code hit
+        // stale_entry's expect right here).
+        release_with_flip(&cfg, 2, "ds/c").await;
+        let (etag1, body1) = getter
+            .await
+            .expect("cold get must not panic under repeated discards");
+        // Forced store serves the ds/b snapshot: one-request-stale by
+        // design; the next request's fingerprint check refreshes to ds/c.
+        assert!(body1.windows(4).any(|w| w == b"ds/b"));
+        assert!(!etag1.is_empty());
+        // Convergence: the next get serves the stale ds/b entry and spawns
+        // a background refresh against the stable ds/c config.
+        let (_, body2) = cache.get(&cfg).await;
+        assert!(body2.windows(4).any(|w| w == b"ds/b"));
+        release_with_flip(&cfg, 3, "ds/c").await;
+        cache.refreshing.lock().await;
+        let (etag3, body3) = cache.get(&cfg).await;
+        assert!(body3.windows(4).any(|w| w == b"ds/c"));
+        assert_ne!(etag1, etag3);
     }
 }
