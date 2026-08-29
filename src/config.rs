@@ -802,10 +802,7 @@ pub type SharedConfig = Arc<RwLock<ValidatedConfig>>;
 /// DIRECTORY, so this filters out editor temporaries (\.swp, 4913,
 /// rename sources) and unrelated directory activity (hot-reload-watcher
 /// spec §Design "Event filter").
-fn event_touches_config(
-    paths: &[std::path::PathBuf],
-    file_name: &std::ffi::OsStr,
-) -> bool {
+fn event_touches_config(paths: &[std::path::PathBuf], file_name: &std::ffi::OsStr) -> bool {
     paths.iter().any(|p| p.file_name() == Some(file_name))
 }
 
@@ -830,10 +827,12 @@ pub fn spawn_watcher(path: &Path, shared: SharedConfig) -> anyhow::Result<impl W
         .file_name()
         .map(std::ffi::OsStr::to_owned)
         .ok_or_else(|| anyhow::anyhow!("config path has no file name: {}", resolved.display()))?;
-    let watch_dir = resolved
-        .parent()
-        .map(|p| p.to_path_buf())
-        .ok_or_else(|| anyhow::anyhow!("config path has no parent directory: {}", resolved.display()))?;
+    let watch_dir = resolved.parent().map(|p| p.to_path_buf()).ok_or_else(|| {
+        anyhow::anyhow!(
+            "config path has no parent directory: {}",
+            resolved.display()
+        )
+    })?;
     let watch_path = resolved;
     // Decouple the synchronous notify callback from the async RwLock: the
     // callback only sends (never blocks, never loses an update), and the
@@ -1205,39 +1204,37 @@ mod server_config_tests {
         assert!(validated.server.hide_bundled_models);
     }
 
+    #[cfg(test)]
+    mod watcher_tests {
+        use super::*;
 
-#[cfg(test)]
-mod watcher_tests {
-    use super::*;
-
-    #[test]
-    fn event_touches_config_matches_only_the_exact_filename() {
-        let name = std::ffi::OsStr::new("cxf.toml");
-        // Direct hit (in-place write on the watched directory).
-        assert!(event_touches_config(
-            &[std::path::PathBuf::from("/etc/cxf.toml")],
-            name
-        ));
-        // Rename events carry from+to paths; the to-path matches.
-        assert!(event_touches_config(
-            &[
-                std::path::PathBuf::from("/etc/cxf.toml.editor-tmp"),
-                std::path::PathBuf::from("/etc/cxf.toml"),
-            ],
-            name
-        ));
-        // Editor temporaries and unrelated files never match.
-        assert!(!event_touches_config(
-            &[std::path::PathBuf::from("/etc/.cxf.toml.swp")],
-            name
-        ));
-        assert!(!event_touches_config(
-            &[std::path::PathBuf::from("/etc/4913")],
-            name
-        ));
-        // No paths -> not relevant.
-        assert!(!event_touches_config(&[], name));
+        #[test]
+        fn event_touches_config_matches_only_the_exact_filename() {
+            let name = std::ffi::OsStr::new("cxf.toml");
+            // Direct hit (in-place write on the watched directory).
+            assert!(event_touches_config(
+                &[std::path::PathBuf::from("/etc/cxf.toml")],
+                name
+            ));
+            // Rename events carry from+to paths; the to-path matches.
+            assert!(event_touches_config(
+                &[
+                    std::path::PathBuf::from("/etc/cxf.toml.editor-tmp"),
+                    std::path::PathBuf::from("/etc/cxf.toml"),
+                ],
+                name
+            ));
+            // Editor temporaries and unrelated files never match.
+            assert!(!event_touches_config(
+                &[std::path::PathBuf::from("/etc/.cxf.toml.swp")],
+                name
+            ));
+            assert!(!event_touches_config(
+                &[std::path::PathBuf::from("/etc/4913")],
+                name
+            ));
+            // No paths -> not relevant.
+            assert!(!event_touches_config(&[], name));
+        }
     }
-}
-
 }
