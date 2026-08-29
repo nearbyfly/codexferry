@@ -37,9 +37,9 @@
 //! requests log from their spawned task once the stream finishes. Errors are
 //! serialized by [`error_response`] into the Responses error shape (spec §10).
 //!
-use crate::config::{spawn_watcher, Config, SharedConfig};
+use crate::config::{Config, SharedConfig, spawn_watcher};
 use crate::convert::request::to_chat_request_with_ns_map;
-use crate::convert::response::{build_completed_response, chat_response_to_items, StreamConverter};
+use crate::convert::response::{StreamConverter, build_completed_response, chat_response_to_items};
 use crate::logging;
 use crate::session::SessionStore;
 use crate::upstream::{chat_url, is_done, parse_sse_stream, resolve_api_key, responses_url};
@@ -53,16 +53,16 @@ mod upstream;
 use chat::handle_chat_format;
 
 use axum::{
+    Json, Router,
     extract::{Query, State},
     http::{HeaderMap, StatusCode},
-    response::{sse::Event, sse::Sse, IntoResponse, Response},
+    response::{IntoResponse, Response, sse::Event, sse::Sse},
     routing::{get, post},
-    Json, Router,
 };
 use bytes::Bytes;
 use capture::{input_items, save_session, store_enabled};
 use futures_util::StreamExt;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
@@ -211,7 +211,7 @@ pub struct AppState {
     pub config: SharedConfig,
     pub sessions: SessionStore,
     pub client: reqwest::Client,
-    pub models: crate::models_cache::CatalogCache,
+    pub models: Arc<crate::models_cache::CatalogCache>,
     pub metrics: crate::metrics::Metrics,
     /// Per-process codex client-version tripwire (spec §3): remembers which
     /// versions this daemon has already reported so the "rerun doctor"
@@ -356,7 +356,7 @@ pub async fn serve(
         config: shared,
         sessions,
         client,
-        models: crate::models_cache::CatalogCache::new(),
+        models: Arc::new(crate::models_cache::CatalogCache::new()),
         metrics: crate::metrics::Metrics::new(),
         version_tracker: Arc::new(crate::version::CodexVersionTracker::new()),
         doctor_state_path: crate::version::state_path(),

@@ -11,6 +11,7 @@ use bytes::Bytes;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hasher;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -61,6 +62,9 @@ struct Cached {
 /// because the installed Codex template is temporarily unreadable).
 pub struct CatalogCache {
     inner: Mutex<Option<Cached>>,
+    /// Single-flight gate for background refreshes: try_lock decides
+    /// "spawn the refresh" vs "one is already running" (spec §Design).
+    refreshing: tokio::sync::Mutex<()>,
     /// Bundled-catalog discovery, injectable so unit tests never depend on
     /// the host's real codex binary (hide-bundled spec §Freshness).
     discovery: fn() -> Vec<serde_json::Value>,
@@ -71,26 +75,51 @@ impl CatalogCache {
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(None),
+            refreshing: tokio::sync::Mutex::new(()),
             discovery: crate::catalog::discover_bundled_models,
         }
     }
 
-    /// Return `(etag, body)`. Fast path: pure memory. Miss/expired: an
-    /// inline rebuild from a config SNAPSHOT — the read guard is dropped
-    /// before any subprocess call, so the config applier's write lock is
-    /// never queued behind discovery (spec §Problem). NOTE: in this
-    /// interim form the rebuild still blocks the worker; Task 2 moves it
-    /// to a background task.
-    pub async fn get(&self, config: &crate::config::SharedConfig) -> (String, Bytes) {
-        let (fingerprint, snapshot) = {
-            let guard = config.read().await;
-            (fingerprint_config(&guard), guard.clone())
-        };
+    /// Return `(etag, body)`, never blocking on a subprocess on the request
+    /// path and never holding a config guard across one (spec §Goal).
+    /// - fast path: fresh cache hit;
+    /// - stale path: return the old entry, spawn a single-flight background
+    ///   refresh;
+    /// - cold start (no entry): refresh inline, or WAIT for an in-flight
+    ///   refresh (a daemon that just started must answer correctly).
+    pub async fn get(self: &Arc<Self>, config: &crate::config::SharedConfig) -> (String, Bytes) {
+        let fingerprint = fingerprint_config(&*config.read().await);
         if let Some(hit) = self.fast_hit(fingerprint) {
             return hit;
         }
-        self.rebuild_inline(fingerprint, &snapshot);
-        self.stale_entry()
+        if self.inner.lock().unwrap().is_some() {
+            // Stale-while-revalidate. The single-flight try_lock lives
+            // INSIDE the spawned task (an Arc owns everything, so the task
+            // is 'static); losers exit immediately.
+            let cache = Arc::clone(self);
+            let config = Arc::clone(config);
+            tokio::spawn(async move {
+                if let Ok(_guard) = cache.refreshing.try_lock() {
+                    cache.refresh(&config).await;
+                }
+            });
+            self.stale_entry()
+        } else if let Ok(_guard) = self.refreshing.try_lock() {
+            // Cold start, we are first: refresh inline while holding the
+            // single-flight lock.
+            self.refresh(config).await;
+            self.stale_entry()
+        } else {
+            // Cold start, someone else is refreshing: wait for them, then
+            // serve their entry — or refresh ourselves if theirs failed to
+            // produce one (spec §Cold start).
+            let _guard = self.refreshing.lock().await;
+            if let Some(hit) = self.fast_hit(fingerprint_config(&*config.read().await)) {
+                return hit;
+            }
+            self.refresh(config).await;
+            self.stale_entry()
+        }
     }
 
     /// Fast-path check: cached entry fresh under this fingerprint and the
@@ -123,16 +152,37 @@ impl CatalogCache {
             .expect("stale/cold path requires a cached entry after rebuild")
     }
 
-    /// Inline rebuild (Task 1 interim form; Task 2 replaces this with the
-    /// background `refresh`). Blocking; caller must not hold any config
-    /// guard (spec §Design).
-    fn rebuild_inline(&self, fingerprint: u64, snapshot: &ValidatedConfig) {
-        let (template_path, template) = crate::catalog::reload_template();
-        let template_mtime = template_path.as_ref().and_then(file_mtime);
-        let mut generated = crate::catalog::build_catalog_value(snapshot, template.as_ref());
+    /// One refresh run: read the CURRENT config, join the two subprocess
+    /// calls on blocking threads, build, and store only if the config has
+    /// not changed since the read (fingerprint guard, spec §Design step 4).
+    /// Subprocess failures degrade inside the rebuild exactly as the inline
+    /// path always did and the result IS stored (spec §Design step 5).
+    async fn refresh(&self, config: &crate::config::SharedConfig) {
+        let (fingerprint, snapshot) = {
+            let guard = config.read().await;
+            (fingerprint_config(&guard), guard.clone())
+        };
         let hide_bundled = snapshot.server.hide_bundled_models;
+        let discovery = self.discovery;
+        // Only run the discovery subprocess when hide_bundled is on (mirrors
+        // the pre-SWR rebuild_inline behavior: the test asserts CALLS == 0
+        // when the flag is off, and running discovery unconditionally would
+        // also waste a subprocess on every refresh).
+        let (template, bundled) = if hide_bundled {
+            tokio::join!(
+                tokio::task::spawn_blocking(crate::catalog::reload_template),
+                tokio::task::spawn_blocking(move || discovery()),
+            )
+        } else {
+            let t = tokio::task::spawn_blocking(crate::catalog::reload_template).await;
+            (t, Ok(Vec::new()))
+        };
+        // JoinError only on a panicking closure; degrade like any failure.
+        let (template_path, template) = template.unwrap_or((None, None));
+        let bundled = bundled.unwrap_or_default();
+        let template_mtime = template_path.as_ref().and_then(file_mtime);
+        let mut generated = crate::catalog::build_catalog_value(&snapshot, template.as_ref());
         if hide_bundled {
-            let bundled = (self.discovery)();
             if bundled.is_empty() {
                 tracing::warn!(
                     "hide_bundled_models is on but `codex debug models --bundled` \
@@ -151,6 +201,9 @@ impl CatalogCache {
             .map(Bytes::from)
             .unwrap_or_default();
         let etag = etag_for(fingerprint, &body);
+        if fingerprint_config(&*config.read().await) != fingerprint {
+            return;
+        }
         *self.inner.lock().unwrap() = Some(Cached {
             body: body.clone(),
             etag: etag.clone(),
@@ -238,7 +291,7 @@ context_window = 1000
     #[tokio::test]
     async fn stable_etag_and_body_when_nothing_changes() {
         let cfg = Arc::new(RwLock::new(config_with_route("ds/a")));
-        let cache = CatalogCache::new();
+        let cache = Arc::new(CatalogCache::new());
         let (etag1, body1) = cache.get(&cfg).await;
         let (etag2, body2) = cache.get(&cfg).await;
         assert_eq!(etag1, etag2);
@@ -248,9 +301,15 @@ context_window = 1000
     #[tokio::test]
     async fn route_change_invalidates() {
         let cfg = Arc::new(RwLock::new(config_with_route("ds/a")));
-        let cache = CatalogCache::new();
+        let cache = Arc::new(CatalogCache::new());
         let (etag1, body1) = cache.get(&cfg).await;
         *cfg.write().await = config_with_route("ds/b");
+        // SWR: the stale get returns the OLD entry; the spawned refresh
+        // builds the new one in the background. Wait for it, then a fresh
+        // get observes the change.
+        let _ = cache.get(&cfg).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let _ = cache.refreshing.lock().await;
         let (etag2, body2) = cache.get(&cfg).await;
         assert_ne!(etag1, etag2);
         assert!(body2.windows(4).any(|w| w == b"ds/b"));
@@ -262,7 +321,7 @@ context_window = 1000
         // Simulates a shell-out/no-file template source: template_path is None,
         // so the fast path cannot rely on mtime and must re-discover periodically.
         let cfg = Arc::new(RwLock::new(config_with_route("ds/a")));
-        let cache = CatalogCache::new();
+        let cache = Arc::new(CatalogCache::new());
         let _ = cache.get(&cfg).await;
 
         // Fresh entry: a second get with the same fingerprint is a fast-path hit.
@@ -283,7 +342,10 @@ context_window = 1000
             let cached = inner.as_mut().unwrap();
             cached.checked_at = std::time::Instant::now() - (std::time::Duration::from_secs(61));
         }
+        // SWR: the stale get spawns a background refresh; wait for it.
         let _ = cache.get(&cfg).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let _ = cache.refreshing.lock().await;
         let rebuilt_checked_at = {
             let inner = cache.inner.lock().unwrap();
             inner.as_ref().unwrap().checked_at
@@ -319,10 +381,11 @@ context_window = 1000
             marker_discovery()
         }
         let cfg = Arc::new(RwLock::new(config_with_flag("ds/a", false)));
-        let cache = CatalogCache {
+        let cache = Arc::new(CatalogCache {
             inner: Mutex::new(None),
+            refreshing: Default::default(),
             discovery: counting,
-        };
+        });
         let (_, body) = cache.get(&cfg).await;
         assert!(
             !body.windows(10).any(|w| w == b"gpt-marker"),
@@ -338,10 +401,11 @@ context_window = 1000
     #[tokio::test]
     async fn hide_flag_on_appends_hide_entries() {
         let cfg = Arc::new(RwLock::new(config_with_flag("ds/a", true)));
-        let cache = CatalogCache {
+        let cache = Arc::new(CatalogCache {
             inner: Mutex::new(None),
+            refreshing: Default::default(),
             discovery: marker_discovery,
-        };
+        });
         let (etag, body) = cache.get(&cfg).await;
         let v: Value = serde_json::from_slice(&body).unwrap();
         let models = v["models"].as_array().expect("models array");
@@ -362,12 +426,19 @@ context_window = 1000
     #[tokio::test]
     async fn hide_flag_toggle_invalidates_cache() {
         let cfg = Arc::new(RwLock::new(config_with_flag("ds/a", false)));
-        let cache = CatalogCache {
+        let cache = Arc::new(CatalogCache {
             inner: Mutex::new(None),
+            refreshing: Default::default(),
             discovery: marker_discovery,
-        };
+        });
         let (etag1, body1) = cache.get(&cfg).await;
         *cfg.write().await = config_with_flag("ds/a", true);
+        // SWR: the stale get returns the OLD entry; the spawned refresh
+        // builds the new one in the background. Wait for it, then a fresh
+        // get observes the change.
+        let _ = cache.get(&cfg).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let _ = cache.refreshing.lock().await;
         let (etag2, body2) = cache.get(&cfg).await;
         assert_ne!(etag1, etag2, "flag toggle must invalidate the cache");
         assert!(!body1.windows(10).any(|w| w == b"gpt-marker"));
@@ -385,10 +456,11 @@ context_window = 1000
             marker_discovery()
         }
         let cfg = Arc::new(RwLock::new(config_with_flag("ds/a", true)));
-        let cache = CatalogCache {
+        let cache = Arc::new(CatalogCache {
             inner: Mutex::new(None),
+            refreshing: Default::default(),
             discovery: counting,
-        };
+        });
         let _ = cache.get(&cfg).await;
         {
             let mut inner = cache.inner.lock().unwrap();
@@ -404,11 +476,174 @@ context_window = 1000
             cached.checked_at =
                 std::time::Instant::now() - (TEMPLATE_RECHECK_INTERVAL + Duration::from_secs(1));
         }
+        // SWR: the stale get spawns a background refresh; wait for it.
         let _ = cache.get(&cfg).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let _ = cache.refreshing.lock().await;
         assert_eq!(
             CALLS.load(std::sync::atomic::Ordering::SeqCst),
             2,
             "aged entry with hide on must rebuild despite a file-backed template"
         );
+    }
+
+    #[tokio::test]
+    async fn stale_entry_returns_immediately_and_refreshes_in_background() {
+        static GATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+        fn gated() -> Vec<Value> {
+            while !GATE.load(std::sync::atomic::Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            marker_discovery()
+        }
+        let cfg = Arc::new(RwLock::new(config_with_flag("ds/a", true)));
+        let cache = Arc::new(CatalogCache {
+            inner: Mutex::new(None),
+            refreshing: Default::default(),
+            discovery: gated,
+        });
+        let (etag1, _) = cache.get(&cfg).await; // cold: fresh build (gate open)
+        // Fingerprint change -> stale; close the gate so refresh cannot finish.
+        GATE.store(false, std::sync::atomic::Ordering::SeqCst);
+        *cfg.write().await = config_with_flag("ds/b", true);
+        let start = std::time::Instant::now();
+        let (etag2, _) = cache.get(&cfg).await;
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "stale get must not wait for the gated refresh (took {:?})",
+            start.elapsed()
+        );
+        assert_eq!(etag2, etag1, "stale get must return the OLD body's etag");
+        // Let the background refresh finish, then the next get is fresh.
+        GATE.store(true, std::sync::atomic::Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let _ = cache.refreshing.lock().await;
+        let (etag3, body3) = cache.get(&cfg).await;
+        assert_ne!(etag3, etag1);
+        assert!(
+            body3.windows(4).any(|w| w == b"ds/b"),
+            "refreshed body must contain ds/b"
+        );
+    }
+
+    #[tokio::test]
+    async fn single_flight_merges_concurrent_stale_gets() {
+        static GATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+        static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        fn counting_gated() -> Vec<Value> {
+            CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            while !GATE.load(std::sync::atomic::Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            marker_discovery()
+        }
+        let cfg = Arc::new(RwLock::new(config_with_flag("ds/a", true)));
+        let cache = Arc::new(CatalogCache {
+            inner: Mutex::new(None),
+            refreshing: Default::default(),
+            discovery: counting_gated,
+        });
+        let _ = cache.get(&cfg).await; // cold build: CALLS == 1
+        GATE.store(false, std::sync::atomic::Ordering::SeqCst);
+        *cfg.write().await = config_with_flag("ds/b", true);
+        let mut joins = Vec::new();
+        for _ in 0..8 {
+            let c = Arc::clone(&cache);
+            let cfg2 = Arc::clone(&cfg);
+            joins.push(tokio::spawn(async move { c.get(&cfg2).await }));
+        }
+        for j in joins {
+            let _ = j.await.unwrap();
+        }
+        assert_eq!(
+            CALLS.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "exactly one background refresh may run (1 cold + 1 refresh)"
+        );
+        GATE.store(true, std::sync::atomic::Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let _ = cache.refreshing.lock().await;
+        assert_eq!(CALLS.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn refresh_result_discarded_when_config_changes_mid_refresh() {
+        static GATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+        fn gated() -> Vec<Value> {
+            while !GATE.load(std::sync::atomic::Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            marker_discovery()
+        }
+        let cfg = Arc::new(RwLock::new(config_with_flag("ds/a", true)));
+        let cache = Arc::new(CatalogCache {
+            inner: Mutex::new(None),
+            refreshing: Default::default(),
+            discovery: gated,
+        });
+        let (etag1, _) = cache.get(&cfg).await; // ds/a entry
+        GATE.store(false, std::sync::atomic::Ordering::SeqCst);
+        *cfg.write().await = config_with_flag("ds/b", true); // triggers refresh #1
+        let _ = cache.get(&cfg).await; // spawns refresh (gated)
+        // Yield so the spawned task polls and reads the config snapshot
+        // (ds/b) BEFORE the test's mid-refresh write; under current_thread
+        // the spawned task is not polled between the spawn and this yield.
+        tokio::task::yield_now().await;
+        *cfg.write().await = config_with_flag("ds/c", true); // mid-refresh change
+        GATE.store(true, std::sync::atomic::Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let _ = cache.refreshing.lock().await; // refresh #1 completes -> discarded
+        // Entry still holds ds/a; this get returns stale and triggers
+        // refresh #2 (gate now open, completes fast).
+        let (etag_stale, _) = cache.get(&cfg).await;
+        assert_eq!(
+            etag_stale, etag1,
+            "discarded refresh must leave the old entry"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let _ = cache.refreshing.lock().await;
+        let (_, body3) = cache.get(&cfg).await;
+        assert!(
+            body3.windows(4).any(|w| w == b"ds/c"),
+            "second refresh must converge to ds/c"
+        );
+    }
+
+    #[tokio::test]
+    async fn cold_concurrent_second_waits_for_inflight_refresh() {
+        static GATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        fn gated() -> Vec<Value> {
+            while !GATE.load(std::sync::atomic::Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            marker_discovery()
+        }
+        let cfg = Arc::new(RwLock::new(config_with_flag("ds/a", true)));
+        let cache = Arc::new(CatalogCache {
+            inner: Mutex::new(None),
+            refreshing: Default::default(),
+            discovery: gated,
+        });
+        // First cold get: acquires the single-flight lock, blocks in the
+        // gated refresh.
+        let first = tokio::spawn({
+            let c = Arc::clone(&cache);
+            let cfg2 = Arc::clone(&cfg);
+            async move { c.get(&cfg2).await }
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Second cold get: no entry, refresh in flight -> must WAIT, not
+        // error or serve nothing.
+        let mut second = Box::pin(cache.get(&cfg));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), second.as_mut())
+                .await
+                .is_err(),
+            "second cold get must wait for the in-flight refresh"
+        );
+        GATE.store(true, std::sync::atomic::Ordering::SeqCst);
+        let (_, body2) = second.await;
+        assert!(body2.windows(4).any(|w| w == b"ds/a"));
+        let _ = first.await.unwrap();
     }
 }

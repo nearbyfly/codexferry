@@ -13,7 +13,7 @@ async fn metrics_endpoint_returns_200() {
         )),
         sessions: crate::session::SessionStore::new(168, 100, 16),
         client: reqwest::Client::new(),
-        models: crate::models_cache::CatalogCache::default(),
+        models: Arc::new(crate::models_cache::CatalogCache::default()),
         metrics: crate::metrics::Metrics::new(),
         version_tracker: Arc::new(crate::version::CodexVersionTracker::new()),
         doctor_state_path: std::path::PathBuf::from("/tmp/codexferry-test-no-state"),
