@@ -211,7 +211,7 @@ pub struct AppState {
     pub config: SharedConfig,
     pub sessions: SessionStore,
     pub client: reqwest::Client,
-    pub models: crate::models_cache::CatalogCache,
+    pub models: Arc<crate::models_cache::CatalogCache>,
     pub metrics: crate::metrics::Metrics,
     /// Per-process codex client-version tripwire (spec §3): remembers which
     /// versions this daemon has already reported so the "rerun doctor"
@@ -356,7 +356,7 @@ pub async fn serve(
         config: shared,
         sessions,
         client,
-        models: crate::models_cache::CatalogCache::new(),
+        models: Arc::new(crate::models_cache::CatalogCache::new()),
         metrics: crate::metrics::Metrics::new(),
         version_tracker: Arc::new(crate::version::CodexVersionTracker::new()),
         doctor_state_path: crate::version::state_path(),
@@ -402,17 +402,19 @@ async fn handle_models(
     Query(q): Query<ModelsQuery>,
     headers: HeaderMap,
 ) -> Response {
-    let config = state.config.read().await;
-
     match q.client_version {
         Some(v) => {
             // Runs before the If-None-Match short-circuit below so a 304
             // revalidation still observes the version.
             observe_client_version(&state, &v);
 
-            // Codex ModelsResponse catalog shape (live model catalog).
-            let (etag, body) = state.models.get(&config);
-            drop(config);
+            // Codex ModelsResponse catalog shape (live model catalog). No
+            // config read guard is held here: get() takes its own short
+            // guards internally, and an outer guard kept alive across the
+            // await can circular-wait with the hot-reload applier's write
+            // lock (tokio RwLock is write-preferring) - PR #6 review
+            // issue 1.
+            let (etag, body) = state.models.get(&state.config).await;
 
             if let Some(if_none) = headers.get("if-none-match").and_then(|v| v.to_str().ok()) {
                 if etag_matches(if_none, &etag) {
@@ -432,6 +434,9 @@ async fn handle_models(
         }
         None => {
             // Chat-Completions list shape (same body as before, but now with ETag + 304).
+            // This branch reads the config directly, so it takes (and
+            // releases) its own guard.
+            let config = state.config.read().await;
             let mut keys: Vec<&String> = config.routes.keys().collect();
             keys.sort();
             let data: Vec<Value> = keys

@@ -218,7 +218,11 @@ support `If-None-Match` → `304 Not Modified`.
 - When `[server] hide_bundled_models = true`, the catalog-shape branch also
   appends `visibility: "hide"` overrides cloned from `codex debug models
   --bundled` so Codex's dynamic-mode slug merge hides its bundled GPT models;
-  see `docs/superpowers/specs/2026-08-26-hide-bundled-models-design.md`.
+  see `docs/superpowers/specs/2026-08-26-hide-bundled-models-design.md`. Catalog
+  serving is stale-while-revalidate: an expired entry is served immediately
+  while a single-flight background task refreshes it, so a config change
+  becomes visible on the request AFTER the refresh completes (see
+  docs/superpowers/specs/2026-08-28-models-swr-design.md).
 
 ### 13. Keep the top-level MD docs in sync
 

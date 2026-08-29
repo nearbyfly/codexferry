@@ -194,6 +194,9 @@ models` lists the router routes alongside the bundled gpt models, and real
 On every successful hot-reload the daemon deletes that cache file, so codex's
 next catalog read re-fetches `/v1/models` instead of waiting out the 300s TTL.
 A background worker inside codex also re-fetches every 3 minutes on its own.
+Catalog serving is stale-while-revalidate: the first `/v1/models` read after a
+config edit may still return the pre-change body; a single-flight background
+refresh stores the updated catalog within seconds.
 
 Caveat: the `/model` picker list is a MERGE, not a replacement — non-ChatGPT
 auth cannot suppress codex's bundled models (`apply_remote_models` requires a
@@ -203,8 +206,10 @@ static mode.
 ### Adding and removing routes (dynamic mode)
 
 Both operations start the same way — edit `cxf.toml` and save. The daemon
-hot-reloads, serves the updated catalog from `/v1/models`, and deletes
-codex's `~/.codex/models_cache.json` so the next codex catalog read is fresh.
+hot-reloads and deletes codex's `~/.codex/models_cache.json`. The updated
+catalog reaches `/v1/models` via the single-flight background refresh
+(stale-while-revalidate): the first read after the edit may return the
+pre-change body, the next one is fresh.
 What differs is what a *running* codex session does next, because codex pins
 the `-m` selection for the lifetime of a session: the catalog governs what
 can be *selected*, never what is *already selected*.
@@ -297,8 +302,9 @@ not what you want day to day.
 ### Clients that do call `/v1/models`
 
 Clients that send `client_version` get the Codex `ModelsResponse` catalog,
-built live from the current config with ETag revalidation — no restart needed
-after a config edit. Clients that do **not** send `client_version` (e.g.
+built from the current config with ETag revalidation — no restart needed
+after a config edit (stale-while-revalidate: the first read after an edit may
+return the pre-change body until the background refresh completes). Clients that do **not** send `client_version` (e.g.
 plain OpenAI-compatible list clients) get the Chat-Completions list shape
 (`{"object":"list","data":[...]}`) at the same URL. Both shapes are supported
 and tested; a codex wired with command auth (dynamic mode above) hits the

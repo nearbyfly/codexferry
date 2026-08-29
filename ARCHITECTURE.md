@@ -348,7 +348,7 @@ codexferry/
 │   ├── mode.rs             # codex wiring mode detection: pinned/dynamic/fallback (191)
 │   ├── version.rs          # codex client-version tripwire (`CodexVersionTracker`) + doctor state (383)
 │   ├── proxy/
-│   │   ├── mod.rs             # axum routing + dispatch + client-version observation (736)
+│   │   ├── mod.rs             # axum routing + dispatch + client-version observation (841)
 │   │   ├── chat.rs            # chat-format handler (515)
 │   │   ├── passthrough.rs     # responses-format relay (472)
 │   │   ├── upstream.rs        # send_upstream + error-class dedup helpers (150)
@@ -367,8 +367,8 @@ codexferry/
 │   │   └── responses_healer_tests.rs  # responses healer unit tests (496)
 │   ├── session.rs          # SessionStore (340)
 │   ├── upstream.rs         # SSE parser + key resolution (623)
-│   ├── catalog.rs          # gen-catalog + build_catalog_value + bundled-model hide-override discovery (1,191)
-│   ├── models_cache.rs     # CatalogCache: route-fingerprint + template-mtime invalidation for live /models; and, when `hide_bundled_models` is on, re-probes `codex debug models --bundled` on the same 60s cadence (405)
+│   ├── catalog.rs          # gen-catalog + build_catalog_value + bundled-model hide-override discovery (1,198)
+│   ├── models_cache.rs     # CatalogCache: route-fingerprint + template-mtime invalidation for live /models; and, when `hide_bundled_models` is on, re-probes `codex debug models --bundled` on the same 60s cadence (739)
 │   ├── logging.rs          # tracing init (36)
 │   ├── metrics.rs          # Prometheus metrics registry + /metrics encoding (369)
 │   ├── normalize.rs        # boundary normalization (hoist, namespace flatten + chat-name encode/decode map, unknown-type visibility) (452)
@@ -396,6 +396,6 @@ codexferry/
 > Line counts are approximate and include comments; they drift as the code evolves.
 > Update them when making significant changes.
 
-~23,684 lines total across the scripts/, src/ and tests/ files above. 434 tests
-(392 unit + 5 e2e-mock unit + 36 integration passing + 1 ignored live-probe
+~23,684 lines total across the scripts/, src/ and tests/ files above. 442 tests
+(398 unit + 5 e2e-mock unit + 38 integration passing + 1 ignored live-probe
 test).

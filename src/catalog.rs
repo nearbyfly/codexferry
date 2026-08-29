@@ -498,14 +498,21 @@ fn bundled_from_command_with_timeout(cmd: &str, timeout: Duration) -> Vec<Value>
     // write(2) while we only poll try_wait (same approach Command::output()
     // uses internally).
     let stdout_pipe = child.stdout.take();
-    let reader = std::thread::spawn(move || {
-        use std::io::Read;
-        let mut buf = Vec::new();
-        if let Some(mut out) = stdout_pipe {
-            let _ = out.read_to_end(&mut buf);
-        }
-        buf
-    });
+    // Named for /proc/<pid>/task visibility (SWR spec §Thread naming);
+    // spawn failure degrades like every other discovery failure.
+    let reader = match std::thread::Builder::new()
+        .name("bundled-reader".to_string())
+        .spawn(move || {
+            use std::io::Read;
+            let mut buf = Vec::new();
+            if let Some(mut out) = stdout_pipe {
+                let _ = out.read_to_end(&mut buf);
+            }
+            buf
+        }) {
+        Ok(handle) => handle,
+        Err(_) => return Vec::new(),
+    };
     let deadline = std::time::Instant::now() + timeout;
     let status = loop {
         if let Some(status) = child.try_wait().ok().flatten() {
