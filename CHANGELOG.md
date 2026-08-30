@@ -9,6 +9,30 @@ Each release's section is drafted with `scripts/release.sh vX.Y.Z
 --prep-changelog`, curated by hand, and committed to `main` **before** the
 release is cut, so both remotes receive it through the normal push flow.
 
+## [v0.1.4] — Unreleased
+
+**`merge_fragmented` heal pass for upstream Responses SSE fragmentation.**
+
+### Features
+
+- `[quirks] merge_fragmented` (default ON): when an upstream Responses
+  gateway emits one logical output item as N consecutive
+  `output_item.added` events (observed with MiniMax M3 in
+  `NOTES-2026-08-28`, typical 5–14 fragments), the daemon merges them
+  into a single Responses-conformant item. All deltas in the run are
+  rewritten to the first fragment's `item_id` / `output_index`, and a
+  synthesized `content_part.done` + `output_item.done` is emitted at
+  the run boundary. Applies to consecutive same-type `message` /
+  `reasoning` items, and to consecutive `function_call` items with
+  matching `call_id` (OpenAI Responses contract: same call must live
+  in the same item). Off via `[quirks] disabled = ["merge_fragmented"]`.
+  Hot-reloadable. Responses-format path only — chat-format path is
+  naturally unfragmented.
+
+### Spec
+
+`docs/superpowers/specs/2026-08-30-fragmented-items-merger-design.md`.
+
 ## [v0.1.3] — 2026-08-28
 
 **Dynamic-mode picker cleanup (hide bundled GPT models), richer error
