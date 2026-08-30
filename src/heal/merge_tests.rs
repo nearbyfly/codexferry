@@ -290,8 +290,9 @@ fn w2_subsequent_content_part_added_suppressed() {
 }
 
 /// Spec W3: subsequent-fragment `output_item.done` and `content_part.done`
-/// are suppressed (synthesized versions land at run boundary — Task 5
-/// later part / Task 6 verifies).
+/// are suppressed when the run has accumulated content (merged text non-empty).
+/// Length-1 runs with no merged content pass done through unchanged (Task 6
+/// tighten). This fixture adds deltas so merged_text is non-empty.
 #[test]
 fn w3_subsequent_dones_suppressed() {
     let mut m = FragmentedItemMerger::new(true);
@@ -300,6 +301,15 @@ fn w3_subsequent_dones_suppressed() {
             "response.output_item.added",
             &format!(
                 r#"{{"type":"response.output_item.added","output_index":0,"item":{{"type":"message","id":"{id}","role":"assistant","status":"in_progress","content":[]}}}}"#
+            ),
+        )
+    };
+    let delta = |text: &str| {
+        sse(
+            "response.output_text.delta",
+            &format!(
+                r#"{{"type":"response.output_text.delta","item_id":"msg_0","output_index":0,"delta":"{}"}}"#,
+                text
             ),
         )
     };
@@ -320,11 +330,14 @@ fn w3_subsequent_dones_suppressed() {
         )
     };
     let _ = push_raw(&mut m, &msg("msg_0"));
-    let _ = push_raw(&mut m, &msg("msg_1"));
+    let _ = push_raw(&mut m, &msg("msg_1")); // run length >= 2
+    // Feed deltas so merged_text is non-empty; then done is suppressed.
+    let _ = push_raw(&mut m, &delta("hello"));
+    let _ = push_raw(&mut m, &delta("world"));
     let cpd_out = push_raw(&mut m, &cpd("msg_1"));
     let oid_out = push_raw(&mut m, &oid("msg_1"));
-    assert!(cpd_out.is_empty(), "msg_1's content_part.done suppressed");
-    assert!(oid_out.is_empty(), "msg_1's output_item.done suppressed");
+    assert!(cpd_out.is_empty(), "msg_1's content_part.done suppressed (merged)");
+    assert!(oid_out.is_empty(), "msg_1's output_item.done suppressed (merged)");
 }
 
 /// Spec W4: when a type switch flushes the run, the synthesized
@@ -410,4 +423,122 @@ fn w5_synthesized_output_item_done_has_merged_content() {
         all_str.contains(r#""text":"abcdef""#),
         "merged content 'abcdef' present: {all_str}"
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Task 6: Boundaries and failure modes (E1–E4)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Spec E1: a 14-fragment run (the MiniMax M3 worst case from
+/// NOTES-2026-08-28 §2) merges cleanly.
+#[test]
+fn e1_fourteen_fragment_run_merges() {
+    let mut m = FragmentedItemMerger::new(true);
+    let msg = |idx: u64| {
+        sse(
+            "response.output_item.added",
+            &format!(
+                "{{\"type\":\"response.output_item.added\",\"output_index\":{},\"item\":{{\"type\":\"message\",\"id\":\"msg_{}\",\"role\":\"assistant\",\"status\":\"in_progress\",\"content\":[]}}}}",
+                idx, idx
+            ),
+        )
+    };
+    let mut emitted = 0;
+    for i in 0..14 {
+        let out = push_raw(&mut m, &msg(i));
+        if !out.is_empty() {
+            emitted += 1;
+        }
+    }
+    assert_eq!(emitted, 1, "only the first fragment passes through, 13 suppressed");
+}
+
+/// Spec E2: a message run that switches to function_call flushes the
+/// synthesized dones BEFORE the function_call item is emitted.
+#[test]
+fn e2_run_flushes_done_before_type_switch() {
+    let mut m = FragmentedItemMerger::new(true);
+    // Distinct output_index for each message item so the run accumulates
+    // two separate added events before the type switch. Deltas are fed so
+    // the run has merged text to synthesize a done event.
+    let msg = |idx: u64, id: &str| {
+        sse(
+            "response.output_item.added",
+            &format!(
+                "{{\"type\":\"response.output_item.added\",\"output_index\":{},\"item\":{{\"type\":\"message\",\"id\":\"{}\",\"role\":\"assistant\",\"status\":\"in_progress\",\"content\":[]}}}}",
+                idx, id
+            ),
+        )
+    };
+    let fc = sse(
+        "response.output_item.added",
+        r#"{"type":"response.output_item.added","output_index":2,"item":{"type":"function_call","id":"fc_0","call_id":"c0","name":"shell","arguments":"","status":"in_progress"}}"#,
+    );
+    let delta = |text: &str| {
+        sse(
+            "response.output_text.delta",
+            &format!(
+                "{{\"type\":\"response.output_text.delta\",\"item_id\":\"msg_0\",\"output_index\":0,\"delta\":\"{}\"}}",
+                text
+            ),
+        )
+    };
+    let _ = push_raw(&mut m, &msg(0, "msg_0"));
+    let _ = push_raw(&mut m, &msg(1, "msg_1")); // suppress: same type, same run
+    let _ = push_raw(&mut m, &delta("hello"));
+    let _ = push_raw(&mut m, &delta("world"));
+    let fc_out = push_raw(&mut m, &fc);
+    let all: Vec<u8> = fc_out.into_iter().flat_map(|b| b.to_vec()).collect();
+    let s = std::str::from_utf8(&all).unwrap();
+    // Synthesized done should appear before the function_call's added.
+    let done_pos = s.find("response.output_item.done").unwrap_or(usize::MAX);
+    let fc_pos = s.find(r#""type":"function_call""#).unwrap_or(usize::MAX);
+    assert!(
+        done_pos < fc_pos,
+        "synthesized done must precede function_call: {s}"
+    );
+}
+
+/// Spec E3: a truncated run (only first fragment + a few deltas, then
+/// stream ends) does NOT synthesize done in finish() — gamma-1.
+#[test]
+fn e3_truncated_run_no_synthesized_done_in_finish() {
+    let mut m = FragmentedItemMerger::new(true);
+    let msg = |id: &str| {
+        sse(
+            "response.output_item.added",
+            &format!(
+                "{{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{{\"type\":\"message\",\"id\":\"{}\",\"role\":\"assistant\",\"status\":\"in_progress\",\"content\":[]}}}}",
+                id
+            ),
+        )
+    };
+    let delta = |text: &str| {
+        sse(
+            "response.output_text.delta",
+            &format!(
+                "{{\"type\":\"response.output_text.delta\",\"item_id\":\"msg_0\",\"output_index\":0,\"delta\":\"{}\"}}",
+                text
+            ),
+        )
+    };
+    let _ = push_raw(&mut m, &msg("msg_0"));
+    let _ = push_raw(&mut m, &msg("msg_1"));
+    let _ = push_raw(&mut m, &delta("half"));
+    // Stream ends without response.completed.
+    let finish_out = m.finish();
+    assert!(finish_out.is_empty(), "finish() must not synthesize done (gamma-1)");
+}
+
+/// Spec E4: a fragment with an empty `item.id` passes through (the
+/// merger tolerates; downstream healer handles).
+#[test]
+fn e4_empty_item_id_tolerated() {
+    let mut m = FragmentedItemMerger::new(true);
+    let raw = sse(
+        "response.output_item.added",
+        r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"","role":"assistant","status":"in_progress","content":[]}}"#,
+    );
+    let out = push_raw(&mut m, &raw);
+    assert_eq!(concat(out), raw);
 }

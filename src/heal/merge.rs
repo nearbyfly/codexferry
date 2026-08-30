@@ -121,7 +121,7 @@ impl FragmentedItemMerger {
                 "response.output_text.done"
                 | "response.content_part.done"
                 | "response.output_item.done",
-            ) => self.on_done(),
+            ) => self.on_done(raw),
             Some("response.completed") => self.on_completed(raw),
             _ => vec![Bytes::copy_from_slice(raw)],
         }
@@ -324,8 +324,33 @@ impl FragmentedItemMerger {
     /// legitimate passthrough are not handled here; Task 6 will tighten
     /// that gate (the upstream's done for a length-1 run still surfaces
     /// as identity today).
-    fn on_done(&mut self) -> Vec<Bytes> {
-        Vec::new()
+    /// Suppress upstream `output_text.done` / `content_part.done` /
+    /// `output_item.done` when the active run has accumulated content.
+    /// For length-1 runs (no merge content) or when no run is active,
+    /// pass the upstream done through unchanged so the client sees the
+    /// upstream's own close for that single fragment.
+    ///
+    /// The synthesized done for merged runs lands at run boundaries:
+    /// type switch in `on_added` and `response.completed` in
+    /// `on_completed`. Spec §Event rewriting rules (done events).
+    fn on_done(&mut self, raw: &[u8]) -> Vec<Bytes> {
+        let Some(run) = self.run.as_ref() else {
+            return vec![Bytes::copy_from_slice(raw)];
+        };
+        let has_content = match run.item_type {
+            ItemType::Message => !run.merged_text.is_empty(),
+            ItemType::Reasoning => !run.merged_reasoning.is_empty(),
+            ItemType::FunctionCall => !run.merged_arguments.is_empty(),
+        };
+        if has_content {
+            // Merged run: suppress upstream done; the synthesized one from
+            // flush_run_synthesis closes the run at the boundary.
+            Vec::new()
+        } else {
+            // Length-1 run (or run with no deltas): upstream's own done
+            // is the correct close for that fragment.
+            vec![Bytes::copy_from_slice(raw)]
+        }
     }
 
     /// Flush any active run's synthesized done, then forward the
