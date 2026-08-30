@@ -316,14 +316,6 @@ impl FragmentedItemMerger {
         vec![Bytes::copy_from_slice(raw)]
     }
 
-    /// Suppress `output_text.done` / `content_part.done` /
-    /// `output_item.done` from upstream: the synthesized versions land
-    /// at run boundaries (type switch in `on_added`; `response.completed`
-    /// in `on_completed`). Tracked-run state is untouched here — only the
-    /// emit is dropped. Length-1 runs whose `*.done` would have been
-    /// legitimate passthrough are not handled here; Task 6 will tighten
-    /// that gate (the upstream's done for a length-1 run still surfaces
-    /// as identity today).
     /// Suppress upstream `output_text.done` / `content_part.done` /
     /// `output_item.done` when the active run has accumulated content.
     /// For length-1 runs (no merge content) or when no run is active,
