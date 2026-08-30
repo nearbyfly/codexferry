@@ -69,17 +69,17 @@ fn m5_single_function_call_passthrough() {
 }
 
 /// Spec K1: when the `merge_fragmented` quirk is disabled, the merger
-/// drops all events (the ResponsesStreamHealer downstream still receives
-/// the raw bytes via its own push_event path; in Task 9, the passthrough
-/// wiring will only invoke the merger when the gate is on, so this
-/// short-circuit isn't strictly needed but mirrors DsmlStreamFilter::new(false)).
+/// is an identity passthrough — same posture as
+/// `DsmlStreamFilter::new(false)`. (The cross-quirk use case: gate off
+/// here, but a sibling quirk like `dsml_heal` still wants every event on
+/// the wire; the merger must not drop them.)
 #[test]
-fn k1_disabled_drops_all_events() {
+fn k1_disabled_passes_through_verbatim() {
     let mut m = FragmentedItemMerger::new(false);
     let raw = sse(
         "response.output_item.added",
         r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_0","role":"assistant","status":"in_progress","content":[]}}"#,
     );
     let out = push_raw(&mut m, &raw);
-    assert!(out.is_empty(), "disabled merger must drop events");
+    assert_eq!(concat(out), raw, "disabled merger must pass through verbatim");
 }

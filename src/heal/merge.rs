@@ -39,12 +39,15 @@ impl FragmentedItemMerger {
     /// The signature mirrors `ResponsesStreamHealer::push_event` so the
     /// passthrough wiring in Task 9 is a drop-in chain.
     pub fn push_event(&mut self, raw: &[u8], _event: Option<&str>, _data: &str) -> Vec<Bytes> {
-        if self.enabled {
-            vec![Bytes::copy_from_slice(raw)]
-        } else {
-            // disabled quirk: drop the event entirely (K1 fixture).
-            Vec::new()
+        if !self.enabled {
+            // disabled quirk: identity passthrough (matches
+            // `DsmlStreamFilter::new(false)`). The gate is honored at the
+            // call site in `passthrough.rs` (Task 8); this branch keeps the
+            // merger a safe no-op when invoked unconditionally. Tasks 3+
+            // will replace the body with the real state machine.
+            return vec![Bytes::copy_from_slice(raw)];
         }
+        vec![Bytes::copy_from_slice(raw)]
     }
 
     /// Stream end. Returns nothing in this task; Tasks 5–6 will flush
