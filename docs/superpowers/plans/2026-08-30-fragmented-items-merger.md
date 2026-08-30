@@ -124,7 +124,7 @@ impl Default for HealGates {
 
 ```bash
 cargo test merge_fragmented
-cargo test --lib
+cargo test
 ```
 
 Expected: PASS for `merge_fragmented` (2 tests) and `--lib` (no regressions; the new field's default-true matches the existing deny-by-default philosophy).
@@ -347,7 +347,7 @@ fn k1_disabled_drops_all_events() {
 - [ ] **Step 4: Run the four fixtures**
 
 ```bash
-cargo test --lib merge_tests
+cargo test merge_tests
 ```
 
 Expected: PASS — 4 tests.
@@ -474,10 +474,10 @@ fn m7_function_call_different_call_ids_dont_merge() {
 Run:
 
 ```bash
-cargo test --lib merge_tests::m2_
-cargo test --lib merge_tests::m4_
-cargo test --lib merge_tests::m6_
-cargo test --lib merge_tests::m7_
+cargo test merge_tests::m2_
+cargo test merge_tests::m4_
+cargo test merge_tests::m6_
+cargo test merge_tests::m7_
 ```
 
 Expected: `m2_`/`m4_`/`m6_` FAIL on `out1.is_empty()`; `m7_` FAIL on `assert_eq!(concat(out1), added(1, "call_b"))` (current identity impl returns the bytes, which would actually pass — but the test is correct: different call_id starts a new tracked run, not a fresh passthrough). **Note:** because the Task 2 implementation is identity, M2/M4/M6 fail on the suppression assertion. M7 currently PASSES with the wrong semantics — fix that as part of this task by introducing the run tracker.
@@ -487,10 +487,10 @@ Expected: `m2_`/`m4_`/`m6_` FAIL on `out1.is_empty()`; `m7_` FAIL on `assert_eq!
 Run:
 
 ```bash
-cargo test --lib merge_tests::m2_message_run_suppresses_subsequent_added
-cargo test --lib merge_tests::m4_reasoning_run_suppresses_subsequent_added
-cargo test --lib merge_tests::m6_function_call_same_call_id_merges
-cargo test --lib merge_tests::m7_function_call_different_call_ids_dont_merge
+cargo test merge_tests::m2_message_run_suppresses_subsequent_added
+cargo test merge_tests::m4_reasoning_run_suppresses_subsequent_added
+cargo test merge_tests::m6_function_call_same_call_id_merges
+cargo test merge_tests::m7_function_call_different_call_ids_dont_merge
 ```
 
 Expected: `m2_*` / `m4_*` / `m6_*` FAIL (assertion `out1.is_empty()` does not hold under Task 2's identity impl). `m7_*` PASSES with current Task 2 semantics, but the spec-correct behavior requires the run tracker; the next step introduces it. If `m2_*`/`m4_*`/`m6_*` happen to pass already, do not proceed — investigate before changing production code.
@@ -645,7 +645,7 @@ impl FragmentedItemMerger {
 - [ ] **Step 4: Run the four fixtures to verify they pass**
 
 ```bash
-cargo test --lib merge_tests
+cargo test merge_tests
 ```
 
 Expected: PASS — all 8 tests (4 from Task 2 + 4 new).
@@ -731,8 +731,8 @@ fn m9_interleaved_runs_each_merge_independently() {
 Run:
 
 ```bash
-cargo test --lib merge_tests::m8_
-cargo test --lib merge_tests::m9_
+cargo test merge_tests::m8_
+cargo test merge_tests::m9_
 ```
 
 Expected: `m8_` PASSES already (Task 3's impl already routes type-switches as fresh runs). `m9_` FAIL on `out_rs == rs` and `out3 == msg(3)` (current Task 3 impl doesn't handle the type-switch flush correctly when the prior run had length ≥ 2).
@@ -829,7 +829,7 @@ Add the placeholder helper (no-op for now; Task 5 fills it in):
 - [ ] **Step 4: Run the two new fixtures**
 
 ```bash
-cargo test --lib merge_tests
+cargo test merge_tests
 ```
 
 Expected: PASS — 10 tests total. (M8 already passes; M9 now passes because the type-switch path correctly discards the prior tracked run and starts fresh.)
@@ -972,7 +972,7 @@ fn w5_synthesized_output_item_done_has_merged_content() {
 Run:
 
 ```bash
-cargo test --lib merge_tests::w
+cargo test merge_tests::w
 ```
 
 Expected: `w1`/`w2`/`w3` FAIL (current impl is identity for deltas / part.added / done in merge mode); `w4`/`w5` FAIL (synthesis placeholder is empty).
@@ -1209,7 +1209,7 @@ Add the new methods (insert before `finish`):
 - [ ] **Step 4: Run all fixtures**
 
 ```bash
-cargo test --lib merge_tests
+cargo test merge_tests
 ```
 
 Expected: PASS — 15 tests total.
@@ -1315,7 +1315,7 @@ fn e4_empty_item_id_tolerated() {
 Run:
 
 ```bash
-cargo test --lib merge_tests::e
+cargo test merge_tests::e
 ```
 
 Expected: `e1` PASSES (already covered). `e2` PASSES (already correct ordering). `e3` PASSES (finish() is empty by design). `e4` PASSES (Task 3 impl tolerates empty id).
@@ -1325,7 +1325,7 @@ Expected: `e1` PASSES (already covered). `e2` PASSES (already correct ordering).
 Run:
 
 ```bash
-cargo test --lib merge_tests
+cargo test merge_tests
 ```
 
 Expected: PASS — 19 tests still green (the tighten below changes on_done semantics; this is the baseline). If any test fails here, fix it before proceeding.
@@ -1360,7 +1360,7 @@ Replace `on_done`:
 - [ ] **Step 4: Run all fixtures**
 
 ```bash
-cargo test --lib merge_tests
+cargo test merge_tests
 ```
 
 Expected: PASS — 19 tests.
@@ -1519,7 +1519,7 @@ data: {"type":"response.output_text.delta","item_id":"msg_1","output_index":1,"d
 Run:
 
 ```bash
-cargo test --lib responses_healer_tests::s
+cargo test responses_healer_tests::s
 ```
 
 Expected: PASS — 3 new tests; no changes to responses.rs needed.
@@ -1529,7 +1529,7 @@ Expected: PASS — 3 new tests; no changes to responses.rs needed.
 Run:
 
 ```bash
-cargo test --lib responses_healer_tests::s
+cargo test responses_healer_tests::s
 ```
 
 Expected: PASS — 3 new tests. (No production code change is needed: the merger + healer composition works by spec; this is a verification fixture, not a TDD failing-test step.)
@@ -1691,10 +1691,10 @@ In `src/proxy/chat.rs:42-53`, add `merge_fragmented` to the literal (the chat pa
 
 ```bash
 cargo build 2>&1 | tail -10
-cargo test --lib
+cargo test
 ```
 
-Expected: `cargo build` PASS (no compile errors); `cargo test --lib` PASS (no regressions in `HealGates`-using code, all 19 merge fixtures pass).
+Expected: `cargo build` PASS (no compile errors); `cargo test` PASS (no regressions in `HealGates`-using code, all 19 merge fixtures pass).
 
 - [ ] **Step 6: Commit**
 
