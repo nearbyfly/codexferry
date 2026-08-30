@@ -523,10 +523,21 @@ timeout_ms = 5000
     // Each rewritten delta must point at the FIRST fragment's
     // item_id (`msg_0`) and output_index (0), not its own — that's
     // the delta-rewrite rule from spec §Event rewriting rules.
-    for evt in events.iter().filter(|e| e.event == "response.output_text.delta") {
+    for evt in events
+        .iter()
+        .filter(|e| e.event == "response.output_text.delta")
+    {
         let v: Value = serde_json::from_str(&evt.data).unwrap();
-        assert_eq!(v["item_id"].as_str(), Some("msg_0"), "item_id rewritten: {evt:?}");
-        assert_eq!(v["output_index"].as_u64(), Some(0), "output_index rewritten: {evt:?}");
+        assert_eq!(
+            v["item_id"].as_str(),
+            Some("msg_0"),
+            "item_id rewritten: {evt:?}"
+        );
+        assert_eq!(
+            v["output_index"].as_u64(),
+            Some(0),
+            "output_index rewritten: {evt:?}"
+        );
     }
 
     // The relay must still emit a `response.completed` event so the
@@ -597,14 +608,20 @@ timeout_ms = 5000
     // Collect the per-item types so we can verify the reasoning item
     // is its own item (not merged with the surrounding messages).
     let mut added_items: Vec<Value> = Vec::new();
-    for evt in events.iter().filter(|e| e.event == "response.output_item.added") {
+    for evt in events
+        .iter()
+        .filter(|e| e.event == "response.output_item.added")
+    {
         let v: Value = serde_json::from_str(&evt.data).unwrap();
         if let Some(t) = v["item"]["type"].as_str() {
             added_items.push(json!({ "type": t, "id": v["item"]["id"] }));
         }
     }
     assert_eq!(added_items.len(), 3);
-    let types: Vec<&str> = added_items.iter().map(|i| i["type"].as_str().unwrap()).collect();
+    let types: Vec<&str> = added_items
+        .iter()
+        .map(|i| i["type"].as_str().unwrap())
+        .collect();
     assert_eq!(
         types,
         vec!["message", "reasoning", "message"],
@@ -616,7 +633,10 @@ timeout_ms = 5000
     // The reasoning item carries its own summary.
     let mut msg_run1_text = String::new();
     let mut msg_run2_text = String::new();
-    for evt in events.iter().filter(|e| e.event == "response.output_text.delta") {
+    for evt in events
+        .iter()
+        .filter(|e| e.event == "response.output_text.delta")
+    {
         let v: Value = serde_json::from_str(&evt.data).unwrap();
         if let Some(d) = v["delta"].as_str() {
             match v["item_id"].as_str() {
@@ -641,7 +661,9 @@ timeout_ms = 5000
     // The reasoning summary delta must reach the client unchanged
     // (run length 1, no rewriting).
     assert!(
-        events.iter().any(|e| e.event == "response.reasoning_summary_text.delta"),
+        events
+            .iter()
+            .any(|e| e.event == "response.reasoning_summary_text.delta"),
         "reasoning summary delta must reach the client:\n{body}"
     );
 }

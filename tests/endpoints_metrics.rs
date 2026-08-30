@@ -709,7 +709,7 @@ format = "chat"
         let config_path = dir.path().join("config.toml");
         std::fs::write(
             &config_path,
-            &config_with_routes(
+            config_with_routes(
                 port,
                 "\"ds/old\" = { model = \"m\", context_window = 1000 }",
             ),

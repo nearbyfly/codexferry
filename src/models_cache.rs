@@ -194,7 +194,7 @@ impl CatalogCache {
         let (template, bundled) = if hide_bundled {
             tokio::join!(
                 tokio::task::spawn_blocking(crate::catalog::reload_template),
-                tokio::task::spawn_blocking(move || discovery()),
+                tokio::task::spawn_blocking(discovery),
             )
         } else {
             let t = tokio::task::spawn_blocking(crate::catalog::reload_template).await;
@@ -551,6 +551,7 @@ context_window = 1000
 
     #[tokio::test]
     async fn single_flight_merges_concurrent_stale_gets() {
+        #![allow(unused_must_use)]
         static GATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
         static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         fn counting_gated() -> Vec<Value> {
@@ -730,6 +731,7 @@ context_window = 1000
         let (_, body2) = cache.get(&cfg).await;
         assert!(body2.windows(4).any(|w| w == b"ds/b"));
         release_with_flip(&cfg, 3, "ds/c").await;
+        #[allow(unused_must_use)]
         cache.refreshing.lock().await;
         let (etag3, body3) = cache.get(&cfg).await;
         assert!(body3.windows(4).any(|w| w == b"ds/c"));

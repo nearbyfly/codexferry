@@ -79,10 +79,7 @@ impl FragmentedItemMerger {
     /// makes `push_event` return the input bytes verbatim and `finish`
     /// return empty — same posture as `DsmlStreamFilter::new(false)`.
     pub fn new(enabled: bool) -> Self {
-        Self {
-            enabled,
-            run: None,
-        }
+        Self { enabled, run: None }
     }
 
     /// Process one upstream SSE event; returns the byte chunks to forward.
@@ -271,18 +268,10 @@ impl FragmentedItemMerger {
             let owned = delta.to_owned();
             match item_type {
                 ItemType::Message => self.run.as_mut().unwrap().merged_text.push_str(&owned),
-                ItemType::Reasoning => self
-                    .run
-                    .as_mut()
-                    .unwrap()
-                    .merged_reasoning
-                    .push_str(&owned),
-                ItemType::FunctionCall => self
-                    .run
-                    .as_mut()
-                    .unwrap()
-                    .merged_arguments
-                    .push_str(&owned),
+                ItemType::Reasoning => self.run.as_mut().unwrap().merged_reasoning.push_str(&owned),
+                ItemType::FunctionCall => {
+                    self.run.as_mut().unwrap().merged_arguments.push_str(&owned)
+                }
             }
         }
         // Derive the event name from the data payload itself so the

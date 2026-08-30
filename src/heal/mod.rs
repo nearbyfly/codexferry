@@ -53,8 +53,8 @@ impl Default for HealGates {
 }
 
 mod dsml;
-mod responses;
 mod merge;
+mod responses;
 mod think;
 
 pub use dsml::{heal_dsml_chat_message, parse_leaked_tool_calls, DsmlStreamFilter, DsmlToolCall};
@@ -71,8 +71,8 @@ pub(crate) use dsml::synthesize_call_id;
 #[cfg(test)]
 mod dsml_tests;
 #[cfg(test)]
-mod responses_healer_tests;
-#[cfg(test)]
 mod merge_tests;
+#[cfg(test)]
+mod responses_healer_tests;
 #[cfg(test)]
 mod think_tests;

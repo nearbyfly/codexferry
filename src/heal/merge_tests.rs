@@ -81,7 +81,11 @@ fn k1_disabled_passes_through_verbatim() {
         r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_0","role":"assistant","status":"in_progress","content":[]}}"#,
     );
     let out = push_raw(&mut m, &raw);
-    assert_eq!(concat(out), raw, "disabled merger must pass through verbatim");
+    assert_eq!(
+        concat(out),
+        raw,
+        "disabled merger must pass through verbatim"
+    );
 }
 
 /// Spec M2: N consecutive message fragments merge into a single item.
@@ -147,7 +151,10 @@ fn m6_function_call_same_call_id_merges() {
     let out0 = push_raw(&mut m, &added(0));
     let out1 = push_raw(&mut m, &added(1));
     assert_eq!(concat(out0), added(0));
-    assert!(out1.is_empty(), "same call_id → merge (suppress second added)");
+    assert!(
+        out1.is_empty(),
+        "same call_id → merge (suppress second added)"
+    );
 }
 
 /// Spec M7: function_call fragments with DIFFERENT call_ids must NOT
@@ -178,12 +185,24 @@ fn m7_function_call_different_call_ids_dont_merge() {
 #[test]
 fn m8_type_switches_each_pass_through() {
     let mut m = FragmentedItemMerger::new(true);
-    let msg_added = || sse("response.output_item.added",
-        r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_0","role":"assistant","status":"in_progress","content":[]}}"#);
-    let rs_added = || sse("response.output_item.added",
-        r#"{"type":"response.output_item.added","output_index":1,"item":{"type":"reasoning","id":"rs_0","summary":[{"type":"summary_text","text":""}]}}"#);
-    let fc_added = || sse("response.output_item.added",
-        r#"{"type":"response.output_item.added","output_index":2,"item":{"type":"function_call","id":"fc_0","call_id":"c0","name":"shell","arguments":"","status":"in_progress"}}"#);
+    let msg_added = || {
+        sse(
+            "response.output_item.added",
+            r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_0","role":"assistant","status":"in_progress","content":[]}}"#,
+        )
+    };
+    let rs_added = || {
+        sse(
+            "response.output_item.added",
+            r#"{"type":"response.output_item.added","output_index":1,"item":{"type":"reasoning","id":"rs_0","summary":[{"type":"summary_text","text":""}]}}"#,
+        )
+    };
+    let fc_added = || {
+        sse(
+            "response.output_item.added",
+            r#"{"type":"response.output_item.added","output_index":2,"item":{"type":"function_call","id":"fc_0","call_id":"c0","name":"shell","arguments":"","status":"in_progress"}}"#,
+        )
+    };
     let a = push_raw(&mut m, &msg_added());
     let b = push_raw(&mut m, &rs_added());
     let c = push_raw(&mut m, &fc_added());
@@ -197,10 +216,18 @@ fn m8_type_switches_each_pass_through() {
 #[test]
 fn m9_interleaved_runs_each_merge_independently() {
     let mut m = FragmentedItemMerger::new(true);
-    let msg = |idx: u64| sse("response.output_item.added",
-        &format!(r#"{{"type":"response.output_item.added","output_index":{idx},"item":{{"type":"message","id":"msg_{idx}","role":"assistant","status":"in_progress","content":[]}}}}"#));
-    let rs = sse("response.output_item.added",
-        r#"{"type":"response.output_item.added","output_index":2,"item":{"type":"reasoning","id":"rs_0","summary":[{"type":"summary_text","text":""}]}}"#);
+    let msg = |idx: u64| {
+        sse(
+            "response.output_item.added",
+            &format!(
+                r#"{{"type":"response.output_item.added","output_index":{idx},"item":{{"type":"message","id":"msg_{idx}","role":"assistant","status":"in_progress","content":[]}}}}"#
+            ),
+        )
+    };
+    let rs = sse(
+        "response.output_item.added",
+        r#"{"type":"response.output_item.added","output_index":2,"item":{"type":"reasoning","id":"rs_0","summary":[{"type":"summary_text","text":""}]}}"#,
+    );
     // First msg run (idx 0, 1) merges.
     let out0 = push_raw(&mut m, &msg(0));
     let out1 = push_raw(&mut m, &msg(1));
@@ -212,9 +239,20 @@ fn m9_interleaved_runs_each_merge_independently() {
     let out3 = push_raw(&mut m, &msg(3));
     let out4 = push_raw(&mut m, &msg(4));
     assert_eq!(concat(out0), msg(0));
-    assert!(out1.is_empty(), "second msg fragment suppressed (run in progress)");
-    assert_eq!(concat(out_rs), rs, "reasoning item unaffected by type switch");
-    assert_eq!(concat(out3), msg(3), "second msg run starts fresh (passes through)");
+    assert!(
+        out1.is_empty(),
+        "second msg fragment suppressed (run in progress)"
+    );
+    assert_eq!(
+        concat(out_rs),
+        rs,
+        "reasoning item unaffected by type switch"
+    );
+    assert_eq!(
+        concat(out3),
+        msg(3),
+        "second msg run starts fresh (passes through)"
+    );
     assert!(out4.is_empty(), "second msg run's 2nd fragment suppressed");
 }
 
@@ -243,7 +281,7 @@ fn w1_subsequent_deltas_rewritten_to_first_fragment() {
     let _ = push_raw(&mut m, &msg(1, "msg_9")); // suppress; run length ≥ 2
     let _d1 = push_raw(&mut m, &delta("msg_0", 0, "Hello "));
     let d2 = push_raw(&mut m, &delta("msg_9", 1, "world")); // rewrite to msg_0, idx 0
-    // d1 is identity (msg_0's own delta)
+                                                            // d1 is identity (msg_0's own delta)
     let d2_bytes = concat(d2);
     let d2_str = std::str::from_utf8(&d2_bytes).unwrap();
     assert!(
@@ -331,13 +369,19 @@ fn w3_subsequent_dones_suppressed() {
     };
     let _ = push_raw(&mut m, &msg("msg_0"));
     let _ = push_raw(&mut m, &msg("msg_1")); // run length >= 2
-    // Feed deltas so merged_text is non-empty; then done is suppressed.
+                                             // Feed deltas so merged_text is non-empty; then done is suppressed.
     let _ = push_raw(&mut m, &delta("hello"));
     let _ = push_raw(&mut m, &delta("world"));
     let cpd_out = push_raw(&mut m, &cpd("msg_1"));
     let oid_out = push_raw(&mut m, &oid("msg_1"));
-    assert!(cpd_out.is_empty(), "msg_1's content_part.done suppressed (merged)");
-    assert!(oid_out.is_empty(), "msg_1's output_item.done suppressed (merged)");
+    assert!(
+        cpd_out.is_empty(),
+        "msg_1's content_part.done suppressed (merged)"
+    );
+    assert!(
+        oid_out.is_empty(),
+        "msg_1's output_item.done suppressed (merged)"
+    );
 }
 
 /// Spec W4: when a type switch flushes the run, the synthesized
@@ -369,7 +413,7 @@ fn w4_synthesized_content_part_done_carries_merged_text() {
     let _ = push_raw(&mut m, &msg("msg_1")); // suppress; merge mode
     let _ = push_raw(&mut m, &delta("msg_0", "Hi "));
     let _ = push_raw(&mut m, &delta("msg_1", "there")); // rewrite
-    // Type switch to reasoning triggers run flush.
+                                                        // Type switch to reasoning triggers run flush.
     let rs_out = push_raw(&mut m, &rs);
     let all: Vec<u8> = rs_out.into_iter().flat_map(|b| b.to_vec()).collect();
     let all_str = std::str::from_utf8(&all).unwrap();
@@ -450,7 +494,10 @@ fn e1_fourteen_fragment_run_merges() {
             emitted += 1;
         }
     }
-    assert_eq!(emitted, 1, "only the first fragment passes through, 13 suppressed");
+    assert_eq!(
+        emitted, 1,
+        "only the first fragment passes through, 13 suppressed"
+    );
 }
 
 /// Spec E2: a message run that switches to function_call flushes the
@@ -527,7 +574,10 @@ fn e3_truncated_run_no_synthesized_done_in_finish() {
     let _ = push_raw(&mut m, &delta("half"));
     // Stream ends without response.completed.
     let finish_out = m.finish();
-    assert!(finish_out.is_empty(), "finish() must not synthesize done (gamma-1)");
+    assert!(
+        finish_out.is_empty(),
+        "finish() must not synthesize done (gamma-1)"
+    );
 }
 
 /// Spec E4: a fragment with an empty `item.id` passes through (the

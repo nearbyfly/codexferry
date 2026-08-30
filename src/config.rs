@@ -764,8 +764,10 @@ format = "chat"
 
     #[test]
     fn merge_fragmented_disables_via_list() {
-        let cfg = parse(&format!("{BASE}\n[quirks]\ndisabled = [\"merge_fragmented\"]\n"))
-            .unwrap();
+        let cfg = parse(&format!(
+            "{BASE}\n[quirks]\ndisabled = [\"merge_fragmented\"]\n"
+        ))
+        .unwrap();
         assert!(!cfg.quirk_enabled("merge_fragmented"));
         // other quirks unaffected
         assert!(cfg.quirk_enabled("dsml_heal"));
