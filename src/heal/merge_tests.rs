@@ -172,3 +172,48 @@ fn m7_function_call_different_call_ids_dont_merge() {
     // but id-different, the second added passes through verbatim.
     assert_eq!(concat(out1), added(1, "call_b"));
 }
+
+/// Spec M8: alternating message / reasoning / function_call items
+/// each pass through as their own item (type-switch boundary).
+#[test]
+fn m8_type_switches_each_pass_through() {
+    let mut m = FragmentedItemMerger::new(true);
+    let msg_added = || sse("response.output_item.added",
+        r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_0","role":"assistant","status":"in_progress","content":[]}}"#);
+    let rs_added = || sse("response.output_item.added",
+        r#"{"type":"response.output_item.added","output_index":1,"item":{"type":"reasoning","id":"rs_0","summary":[{"type":"summary_text","text":""}]}}"#);
+    let fc_added = || sse("response.output_item.added",
+        r#"{"type":"response.output_item.added","output_index":2,"item":{"type":"function_call","id":"fc_0","call_id":"c0","name":"shell","arguments":"","status":"in_progress"}}"#);
+    let a = push_raw(&mut m, &msg_added());
+    let b = push_raw(&mut m, &rs_added());
+    let c = push_raw(&mut m, &fc_added());
+    assert_eq!(concat(a), msg_added());
+    assert_eq!(concat(b), rs_added());
+    assert_eq!(concat(c), fc_added());
+}
+
+/// Spec M9: interleaved runs (msg×N → reasoning×1 → msg×M) — each
+/// run is independent; reasoning item is its own item.
+#[test]
+fn m9_interleaved_runs_each_merge_independently() {
+    let mut m = FragmentedItemMerger::new(true);
+    let msg = |idx: u64| sse("response.output_item.added",
+        &format!(r#"{{"type":"response.output_item.added","output_index":{idx},"item":{{"type":"message","id":"msg_{idx}","role":"assistant","status":"in_progress","content":[]}}}}"#));
+    let rs = sse("response.output_item.added",
+        r#"{"type":"response.output_item.added","output_index":2,"item":{"type":"reasoning","id":"rs_0","summary":[{"type":"summary_text","text":""}]}}"#);
+    // First msg run (idx 0, 1) merges.
+    let out0 = push_raw(&mut m, &msg(0));
+    let out1 = push_raw(&mut m, &msg(1));
+    // Reasoning item — type switch; the prior msg run had length=2 but
+    // Task 3 doesn't flush yet (synthesis is in Task 5). For this
+    // fixture, only assert that the reasoning passes through and the
+    // subsequent msg run starts a fresh tracked item.
+    let out_rs = push_raw(&mut m, &rs);
+    let out3 = push_raw(&mut m, &msg(3));
+    let out4 = push_raw(&mut m, &msg(4));
+    assert_eq!(concat(out0), msg(0));
+    assert!(out1.is_empty(), "second msg fragment suppressed (run in progress)");
+    assert_eq!(concat(out_rs), rs, "reasoning item unaffected by type switch");
+    assert_eq!(concat(out3), msg(3), "second msg run starts fresh (passes through)");
+    assert!(out4.is_empty(), "second msg run's 2nd fragment suppressed");
+}

@@ -36,12 +36,27 @@ impl ItemType {
 /// Active-run state. `Some` means we've seen the first fragment of a run
 /// (run length ≥ 1). The merge-mode suppression / rewriting kicks in only
 /// when we observe the second same-type fragment.
+///
+/// Task 4 adds accumulation fields used by the type-switch flush
+/// (placeholder returns empty; Task 5 synthesizes the merged
+/// content_part.done + output_item.done from these accumulators).
 #[derive(Debug)]
 struct RunState {
     item_type: ItemType,
     start_idx: usize,
     start_id: String,
     call_id: Option<String>,
+    /// Accumulated message text (set when item_type == Message).
+    /// Empty for non-message runs.
+    merged_text: String,
+    /// Accumulated reasoning summary text (Reasoning). Empty otherwise.
+    merged_reasoning: String,
+    /// Accumulated function arguments (FunctionCall). Empty otherwise.
+    merged_arguments: String,
+    /// Whether the first fragment's `content_part.added` has been
+    /// forwarded yet (Task 5 will implement content_part.added handling;
+    /// this field is wired up now for forward compatibility).
+    part_added_emitted: bool,
 }
 
 /// Quirk gate wrapper around the per-request merger (spec §Interface).
@@ -139,6 +154,10 @@ impl FragmentedItemMerger {
                     start_idx: new_idx,
                     start_id: new_id,
                     call_id: new_call_id,
+                    merged_text: String::new(),
+                    merged_reasoning: String::new(),
+                    merged_arguments: String::new(),
+                    part_added_emitted: false,
                 });
                 vec![Bytes::copy_from_slice(raw)]
             }
@@ -160,23 +179,58 @@ impl FragmentedItemMerger {
                     // synthesis land in Tasks 5–6.
                     Vec::new()
                 } else {
-                    // Different logical item: discard the length-1 run
-                    // (no merge content to flush — it had nothing to
-                    // merge) and start fresh with the new fragment.
-                    // Task 4 will tighten this to flush synthesized done
-                    // for type switches; same-type/different-call_id
-                    // (M7) and same-type/type-switch (M8) both pass
-                    // through here.
+                    // Different logical item: flush the prior run
+                    // (synthesized content_part.done + output_item.done
+                    // land in Task 5; for now the placeholder returns
+                    // empty) and start fresh with the new fragment.
+                    //
+                    // Same-type/different-call_id (M7) and
+                    // type-switch (M8/M9) both pass through here.
+                    let mut flushed = Vec::new();
+                    if let Some(prior) = self.run.take() {
+                        // Length-1 runs whose merged_text is still
+                        // empty (no merging happened) skip the flush
+                        // call entirely — there is nothing to
+                        // synthesize. The placeholder is still a
+                        // no-op, but skipping the call avoids
+                        // misleading future Task 5 trace events.
+                        if prior.item_type != ItemType::Message
+                            || !prior.merged_text.is_empty()
+                        {
+                            flushed
+                                .extend(self.flush_run_synthesis_placeholder(prior));
+                        }
+                    }
                     self.run = Some(RunState {
                         item_type,
                         start_idx: new_idx,
                         start_id: new_id,
                         call_id: new_call_id,
+                        merged_text: String::new(),
+                        merged_reasoning: String::new(),
+                        merged_arguments: String::new(),
+                        part_added_emitted: false,
                     });
-                    vec![Bytes::copy_from_slice(raw)]
+                    flushed.push(Bytes::copy_from_slice(raw));
+                    flushed
                 }
             }
         }
+    }
+
+    /// Stub: synthesize the run's flush bytes. Task 5 implements
+    /// `content_part.done` + `output_item.done` based on `RunState`'s
+    /// accumulated `merged_*` fields. The current Task 4 placeholder
+    /// returns empty so M9's existing assertion (the new fragment
+    /// passes through after a type switch) holds: the placeholder
+    /// contract is "produce any bytes the prior run should emit before
+    /// the new fragment is forwarded", and Task 4 deliberately emits
+    /// none.
+    ///
+    /// Task 5 will rename this to `flush_run_synthesis` and fill in
+    /// the body.
+    fn flush_run_synthesis_placeholder(&self, _run: RunState) -> Vec<Bytes> {
+        Vec::new()
     }
 
     /// Stream end. Returns nothing in this task — γ-1 (spec §Out of
