@@ -616,6 +616,156 @@ pub async fn mock_leak_responses_handler(
         .unwrap()
 }
 
+/// Mock native-Responses upstream that emits a fragmented message run —
+/// each `response.output_text.delta` is delivered as its own message item
+/// (5 `output_item.added` events for what should be one logical assistant
+/// message). Models the MiniMax M3 Responses-style per-chunk item
+/// fragmentation that the `merge_fragmented` heal pass collapses
+/// (docs/superpowers/specs/2026-08-30-fragmented-items-merger-design.md).
+/// Without the merger, a Codex TUI renders one logical reply as 5
+/// separate `•` bullets.
+///
+/// Scenario selection is request-driven: the first user input text
+/// chooses the variant ("interleaved" → mixed runs; anything else →
+/// 5-fragment message run). This keeps the harness's per-route TOCTOU
+/// retry semantics intact while serving both integration cases
+/// (`passthrough_merges_fragmented_message_run` +
+/// `passthrough_merges_interleaved_runs`) from a single mock endpoint.
+pub async fn mock_responses_fragmented_handler(
+    State(state): State<MockState>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let parsed: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    state.received_requests.lock().await.push(parsed.clone());
+    state.received_auth.lock().await.push(
+        headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string(),
+    );
+    let is_interleaved = parsed["input"]
+        .as_str()
+        .is_some_and(|c| c.contains("interleaved"));
+    let events: Vec<Result<Event, Infallible>> = if is_interleaved {
+        build_interleaved_fragmented_events()
+    } else {
+        build_simple_fragmented_events()
+    };
+    Sse::new(futures_util::stream::iter(events)).into_response()
+}
+
+/// Build the simple 5-fragment message-run scenario for the fragmented
+/// merger integration test. The upstream emits:
+///
+///   response.created
+///   output_item.added  (msg_0, message, empty content)
+///   output_text.delta  "chunk0 "  (item_id=msg_0, output_index=0)
+///   output_item.added  (msg_1, message, empty content)
+///   output_text.delta  "chunk1 "  (item_id=msg_1, output_index=1)
+///   ... (msg_2 .. msg_4)
+///   response.completed
+///
+/// Without the merger, the client sees 5 `output_item.added` events and
+/// 5 disjoint message items in the Codex TUI. With the merger wired
+/// in, the 4 trailing added events are suppressed and all 5 deltas are
+/// rewritten to the first fragment's `item_id` / `output_index`, so
+/// the client sees exactly 1 `output_item.added` and one merged
+/// assistant message whose text is `"chunk0 chunk1 chunk2 chunk3 chunk4 "`.
+fn build_simple_fragmented_events() -> Vec<Result<Event, Infallible>> {
+    let mut out: Vec<Result<Event, Infallible>> = Vec::new();
+    out.push(Ok(Event::default()
+        .event("response.created")
+        .data(RESPONSE_CREATED_EVENT)));
+    for i in 0..5usize {
+        out.push(Ok(Event::default()
+            .event("response.output_item.added")
+            .data(format!(
+                r#"{{"type":"response.output_item.added","output_index":{i},"item":{{"type":"message","id":"msg_{i}","role":"assistant","status":"in_progress","content":[]}}}}"#
+            ))));
+        out.push(Ok(Event::default()
+            .event("response.output_text.delta")
+            .data(format!(
+                r#"{{"type":"response.output_text.delta","item_id":"msg_{i}","output_index":{i},"delta":"chunk{i} "}}"#
+            ))));
+    }
+    out.push(Ok(Event::default()
+        .event("response.completed")
+        .data(RESPONSE_COMPLETED_EVENT)));
+    out
+}
+
+/// Build the mixed-run scenario for the interleaved-runs integration
+/// test. The upstream emits:
+///
+///   response.created
+///   msg × 3 fragments        (merge → 1 message item)
+///   reasoning × 1 item       (stays as 1 reasoning item)
+///   msg × 2 fragments        (merge → 1 message item)
+///   response.completed
+///
+/// With the merger, the client should see 3 `output_item.added`
+/// events: the merged first message run, the reasoning item, and the
+/// merged second message run. Each run's per-type merged_* gate
+/// (text vs reasoning vs arguments) routes the right accumulator, so
+/// the message text concatenates inside its run, the reasoning summary
+/// stays in its own item, and the second message run concatenates
+/// independently.
+fn build_interleaved_fragmented_events() -> Vec<Result<Event, Infallible>> {
+    let mut out: Vec<Result<Event, Infallible>> = Vec::new();
+    out.push(Ok(Event::default()
+        .event("response.created")
+        .data(RESPONSE_CREATED_EVENT)));
+    // First message run: 3 fragments, output_index 0..3, ids msg_0..msg_2.
+    for i in 0..3usize {
+        out.push(Ok(Event::default()
+            .event("response.output_item.added")
+            .data(format!(
+                r#"{{"type":"response.output_item.added","output_index":{i},"item":{{"type":"message","id":"msg_{i}","role":"assistant","status":"in_progress","content":[]}}}}"#
+            ))));
+        out.push(Ok(Event::default()
+            .event("response.output_text.delta")
+            .data(format!(
+                r#"{{"type":"response.output_text.delta","item_id":"msg_{i}","output_index":{i},"delta":"m{i} "}}"#
+            ))));
+    }
+    // Reasoning item: standalone (run length 1, no merging).
+    let rs_idx = 3usize;
+    out.push(Ok(Event::default()
+        .event("response.output_item.added")
+        .data(format!(
+            r#"{{"type":"response.output_item.added","output_index":{rs_idx},"item":{{"type":"reasoning","id":"rs_0","summary":[{{"type":"summary_text","text":""}}]}}}}"#
+        ))));
+    out.push(Ok(Event::default()
+        .event("response.reasoning_summary_text.delta")
+        .data(format!(
+            r#"{{"type":"response.reasoning_summary_text.delta","item_id":"rs_0","output_index":{rs_idx},"delta":"thinking"}}"#
+        ))));
+    out.push(Ok(Event::default()
+        .event("response.output_item.done")
+        .data(format!(
+            r#"{{"type":"response.output_item.done","output_index":{rs_idx},"item":{{"type":"reasoning","id":"rs_0","summary":[{{"type":"summary_text","text":"thinking"}}]}}}}"#
+        ))));
+    // Second message run: 2 fragments, output_index 4..5, ids msg_4..msg_5.
+    for i in 4..6usize {
+        out.push(Ok(Event::default()
+            .event("response.output_item.added")
+            .data(format!(
+                r#"{{"type":"response.output_item.added","output_index":{i},"item":{{"type":"message","id":"msg_{i}","role":"assistant","status":"in_progress","content":[]}}}}"#
+            ))));
+        out.push(Ok(Event::default()
+            .event("response.output_text.delta")
+            .data(format!(
+                r#"{{"type":"response.output_text.delta","item_id":"msg_{i}","output_index":{i},"delta":"n{i} "}}"#
+            ))));
+    }
+    out.push(Ok(Event::default()
+        .event("response.completed")
+        .data(RESPONSE_COMPLETED_EVENT)));
+    out
+}
+
 /// Spawn the mock upstream on an ephemeral port; returns its base URL and state.
 ///
 /// Binding to port 0 lets the OS pick a free port, so the mock can
@@ -651,6 +801,10 @@ pub async fn spawn_mock_upstream() -> (String, MockState) {
             post(mock_responses_no_completed_handler),
         )
         .route("/v1/leak/responses", post(mock_leak_responses_handler))
+        .route(
+            "/v1/fragmented/responses",
+            post(mock_responses_fragmented_handler),
+        )
         .with_state(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
