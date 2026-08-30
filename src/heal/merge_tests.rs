@@ -83,3 +83,92 @@ fn k1_disabled_passes_through_verbatim() {
     let out = push_raw(&mut m, &raw);
     assert_eq!(concat(out), raw, "disabled merger must pass through verbatim");
 }
+
+/// Spec M2: N consecutive message fragments merge into a single item.
+/// The first fragment's `output_item.added` passes through verbatim;
+/// the rest are suppressed. (Subsequent deltas + done rewriting land in
+/// Task 5; this fixture only asserts the added-event suppression.)
+#[test]
+fn m2_message_run_suppresses_subsequent_added() {
+    let mut m = FragmentedItemMerger::new(true);
+    let added = |id: &str, idx: u64| {
+        sse(
+            "response.output_item.added",
+            &format!(
+                r#"{{"type":"response.output_item.added","output_index":{idx},"item":{{"type":"message","id":"{id}","role":"assistant","status":"in_progress","content":[]}}}}"#
+            ),
+        )
+    };
+    let a0 = added("msg_0", 0);
+    let a1 = added("msg_9", 1);
+    let a2 = added("msg_10", 2);
+    let out0 = push_raw(&mut m, &a0);
+    let out1 = push_raw(&mut m, &a1);
+    let out2 = push_raw(&mut m, &a2);
+    assert_eq!(concat(out0), a0, "first fragment passes through");
+    assert!(out1.is_empty(), "second fragment suppressed");
+    assert!(out2.is_empty(), "third fragment suppressed");
+}
+
+/// Spec M4: N consecutive reasoning fragments merge.
+#[test]
+fn m4_reasoning_run_suppresses_subsequent_added() {
+    let mut m = FragmentedItemMerger::new(true);
+    let added = |id: &str, idx: u64| {
+        sse(
+            "response.output_item.added",
+            &format!(
+                r#"{{"type":"response.output_item.added","output_index":{idx},"item":{{"type":"reasoning","id":"{id}","summary":[{{"type":"summary_text","text":""}}]}}}}"#
+            ),
+        )
+    };
+    let a0 = added("rs_0", 0);
+    let a1 = added("rs_1", 1);
+    let out0 = push_raw(&mut m, &a0);
+    let out1 = push_raw(&mut m, &a1);
+    assert_eq!(concat(out0), a0);
+    assert!(out1.is_empty());
+}
+
+/// Spec M6: N consecutive function_call fragments with the same
+/// `call_id` merge (same logical call split across items — Responses
+/// contract violation by the upstream).
+#[test]
+fn m6_function_call_same_call_id_merges() {
+    let mut m = FragmentedItemMerger::new(true);
+    let added = |idx: u64| {
+        sse(
+            "response.output_item.added",
+            &format!(
+                r#"{{"type":"response.output_item.added","output_index":{idx},"item":{{"type":"function_call","id":"fc_{idx}","call_id":"call_shared","name":"shell","arguments":"","status":"in_progress"}}}}"#
+            ),
+        )
+    };
+    let out0 = push_raw(&mut m, &added(0));
+    let out1 = push_raw(&mut m, &added(1));
+    assert_eq!(concat(out0), added(0));
+    assert!(out1.is_empty(), "same call_id → merge (suppress second added)");
+}
+
+/// Spec M7: function_call fragments with DIFFERENT call_ids must NOT
+/// merge — they are independent tool calls.
+#[test]
+fn m7_function_call_different_call_ids_dont_merge() {
+    let mut m = FragmentedItemMerger::new(true);
+    let added = |idx: u64, cid: &str| {
+        sse(
+            "response.output_item.added",
+            &format!(
+                r#"{{"type":"response.output_item.added","output_index":{idx},"item":{{"type":"function_call","id":"fc_{idx}","call_id":"{cid}","name":"shell","arguments":"","status":"in_progress"}}}}"#
+            ),
+        )
+    };
+    let out0 = push_raw(&mut m, &added(0, "call_a"));
+    let out1 = push_raw(&mut m, &added(1, "call_b"));
+    assert_eq!(concat(out0), added(0, "call_a"));
+    // Different call_id → tracked as a new run, second added passes through
+    // (run length just became 1 again; the first was discarded because
+    // length=1 had no merge). Task 4 handles type switches; for type-same
+    // but id-different, the second added passes through verbatim.
+    assert_eq!(concat(out1), added(1, "call_b"));
+}

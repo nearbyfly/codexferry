@@ -12,17 +12,50 @@
 //! pattern.
 
 use bytes::Bytes;
+use serde_json::Value;
 
-/// Quirk gate wrapper around the per-request merger.
-///
-/// The merger tracks an active run of same-type `output_item.added`
-/// events (spec §State machine). A run with length ≥ 2 triggers the
-/// merging path; length 1 (the healthy case) is a verbatim passthrough.
+/// The three item types the merger knows how to combine (spec §Q2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ItemType {
+    Message,
+    Reasoning,
+    FunctionCall,
+}
+
+impl ItemType {
+    fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "message" => Some(ItemType::Message),
+            "reasoning" => Some(ItemType::Reasoning),
+            "function_call" => Some(ItemType::FunctionCall),
+            _ => None,
+        }
+    }
+}
+
+/// Active-run state. `Some` means we've seen the first fragment of a run
+/// (run length ≥ 1). The merge-mode suppression / rewriting kicks in only
+/// when we observe the second same-type fragment.
+#[derive(Debug)]
+struct RunState {
+    item_type: ItemType,
+    start_idx: usize,
+    start_id: String,
+    call_id: Option<String>,
+}
+
+/// Quirk gate wrapper around the per-request merger (spec §Interface).
 #[derive(Debug)]
 pub struct FragmentedItemMerger {
     /// Whether the `merge_fragmented` quirk is enabled for this request.
-    /// When `false`, the merger is an identity over `push_event`/`finish`.
+    /// When `false`, the merger is an identity over `push_event`/`finish`
+    /// (matches `DsmlStreamFilter::new(false)` precedent).
     enabled: bool,
+    /// Active tracked run, or `None` if no first fragment has been seen
+    /// (or the previous run was discarded). Two same-type fragments in a
+    /// row transition this from length-1 (passthrough) to length-≥2
+    /// (suppression / rewriting of subsequent added events).
+    run: Option<RunState>,
 }
 
 impl FragmentedItemMerger {
@@ -30,30 +63,129 @@ impl FragmentedItemMerger {
     /// makes `push_event` return the input bytes verbatim and `finish`
     /// return empty — same posture as `DsmlStreamFilter::new(false)`.
     pub fn new(enabled: bool) -> Self {
-        Self { enabled }
+        Self {
+            enabled,
+            run: None,
+        }
     }
 
     /// Process one upstream SSE event; returns the byte chunks to forward.
     ///
-    /// In Task 2 this is identity (full state machine lands in Tasks 3–7).
-    /// The signature mirrors `ResponsesStreamHealer::push_event` so the
-    /// passthrough wiring in Task 9 is a drop-in chain.
-    pub fn push_event(&mut self, raw: &[u8], _event: Option<&str>, _data: &str) -> Vec<Bytes> {
+    /// In this task, only `output_item.added` handling changes from
+    /// Task 2's identity. Delta rewriting, done suppression, and
+    /// synthesis land in Tasks 5–6.
+    pub fn push_event(&mut self, raw: &[u8], event: Option<&str>, data: &str) -> Vec<Bytes> {
         if !self.enabled {
             // disabled quirk: identity passthrough (matches
             // `DsmlStreamFilter::new(false)`). The gate is honored at the
             // call site in `passthrough.rs` (Task 8); this branch keeps the
-            // merger a safe no-op when invoked unconditionally. Tasks 3+
-            // will replace the body with the real state machine.
+            // merger a safe no-op when invoked unconditionally.
             return vec![Bytes::copy_from_slice(raw)];
         }
-        vec![Bytes::copy_from_slice(raw)]
+        match event {
+            Some("response.output_item.added") => self.on_added(raw, data),
+            _ => vec![Bytes::copy_from_slice(raw)],
+        }
     }
 
-    /// Stream end. Returns nothing in this task; Tasks 5–6 will flush
-    /// synthesized `content_part.done` / `output_item.done` from active
-    /// runs on the response.completed boundary instead.
+    /// Dispatch an `output_item.added` event through the run tracker.
+    ///
+    /// First fragment: start a tracked run (run length = 1), pass through
+    /// verbatim. Second fragment of the same type + same `call_id`
+    /// (function_call only): suppress (run length ≥ 2; rewriting kicks in
+    /// in Tasks 5–6). Different type or different `call_id`: discard the
+    /// length-1 run (no merge content to flush), start a fresh run with
+    /// the new fragment as its first member.
+    fn on_added(&mut self, raw: &[u8], data: &str) -> Vec<Bytes> {
+        let Ok(v) = serde_json::from_str::<Value>(data) else {
+            return vec![Bytes::copy_from_slice(raw)];
+        };
+        let Some(item_type) = v
+            .get("item")
+            .and_then(|i| i.get("type"))
+            .and_then(Value::as_str)
+            .and_then(ItemType::from_str)
+        else {
+            // Unknown item type: pass through verbatim, no run tracking.
+            return vec![Bytes::copy_from_slice(raw)];
+        };
+        let Some(new_id) = v
+            .get("item")
+            .and_then(|i| i.get("id"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        else {
+            // Defensive: malformed item without an id — passthrough.
+            return vec![Bytes::copy_from_slice(raw)];
+        };
+        let new_idx = v
+            .get("output_index")
+            .and_then(Value::as_u64)
+            .map(|i| i as usize)
+            .unwrap_or(0);
+        let new_call_id = v
+            .get("item")
+            .and_then(|i| i.get("call_id"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+
+        match self.run.as_ref() {
+            None => {
+                // First fragment of a run: pass through verbatim and
+                // start tracking. The next same-type added event will
+                // decide whether this becomes a merge (length ≥ 2).
+                self.run = Some(RunState {
+                    item_type,
+                    start_idx: new_idx,
+                    start_id: new_id,
+                    call_id: new_call_id,
+                });
+                vec![Bytes::copy_from_slice(raw)]
+            }
+            Some(run) => {
+                let same_type = run.item_type == item_type;
+                let same_call_id = match (run.call_id.as_ref(), new_call_id.as_ref()) {
+                    // function_call: identity match on call_id is required.
+                    (Some(a), Some(b)) => a == b,
+                    // Non-function_call items: both sides carry no call_id;
+                    // a non-tracked run plus a missing call_id matches.
+                    (None, None) => true,
+                    // Mixed (one Some, one None): never matches — surfaces
+                    // malformed upstreams that drop or fabricate call_id.
+                    _ => false,
+                };
+                if same_type && same_call_id {
+                    // Second+ fragment of the same logical item: suppress.
+                    // Run length is now ≥ 2; delta rewriting and done
+                    // synthesis land in Tasks 5–6.
+                    Vec::new()
+                } else {
+                    // Different logical item: discard the length-1 run
+                    // (no merge content to flush — it had nothing to
+                    // merge) and start fresh with the new fragment.
+                    // Task 4 will tighten this to flush synthesized done
+                    // for type switches; same-type/different-call_id
+                    // (M7) and same-type/type-switch (M8) both pass
+                    // through here.
+                    self.run = Some(RunState {
+                        item_type,
+                        start_idx: new_idx,
+                        start_id: new_id,
+                        call_id: new_call_id,
+                    });
+                    vec![Bytes::copy_from_slice(raw)]
+                }
+            }
+        }
+    }
+
+    /// Stream end. Returns nothing in this task — γ-1 (spec §Out of
+    /// scope / state machine): never synthesize `output_item.done` at
+    /// `finish()`. Passthrough's `response.failed` event handles
+    /// truncated turns. Tasks 5–6 will flush synthesized done from
+    /// active runs on the `response.completed` boundary instead.
     pub fn finish(&mut self) -> Vec<Bytes> {
+        self.run = None;
         Vec::new()
     }
 }
