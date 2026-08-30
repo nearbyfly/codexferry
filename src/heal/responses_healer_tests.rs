@@ -163,6 +163,7 @@ fn injected_items_use_high_index_base() {
 fn disabled_gates_pass_markup_through_verbatim() {
     let gates = HealGates {
         dsml: false,
+        merge_fragmented: false,
         think: false,
     };
     let out = run_healer(gates, DSML_LEAK_SSE);
@@ -328,6 +329,7 @@ fn non_streaming_gates_off_returns_original() {
     let body = "{\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"<think>x</think>\"}]}]}";
     let gates = HealGates {
         dsml: false,
+        merge_fragmented: false,
         think: false,
     };
     assert_eq!(heal_responses_body(body.as_bytes(), gates), body.as_bytes());
