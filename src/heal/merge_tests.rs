@@ -217,3 +217,197 @@ fn m9_interleaved_runs_each_merge_independently() {
     assert_eq!(concat(out3), msg(3), "second msg run starts fresh (passes through)");
     assert!(out4.is_empty(), "second msg run's 2nd fragment suppressed");
 }
+
+/// Spec W1: subsequent-fragment deltas have `item_id` and
+/// `output_index` rewritten to the first fragment's.
+#[test]
+fn w1_subsequent_deltas_rewritten_to_first_fragment() {
+    let mut m = FragmentedItemMerger::new(true);
+    let msg = |idx: u64, id: &str| {
+        sse(
+            "response.output_item.added",
+            &format!(
+                r#"{{"type":"response.output_item.added","output_index":{idx},"item":{{"type":"message","id":"{id}","role":"assistant","status":"in_progress","content":[]}}}}"#
+            ),
+        )
+    };
+    let delta = |item_id: &str, idx: u64, text: &str| {
+        sse(
+            "response.output_text.delta",
+            &format!(
+                r#"{{"type":"response.output_text.delta","item_id":"{item_id}","output_index":{idx},"delta":"{text}"}}"#
+            ),
+        )
+    };
+    let _ = push_raw(&mut m, &msg(0, "msg_0"));
+    let _ = push_raw(&mut m, &msg(1, "msg_9")); // suppress; run length ≥ 2
+    let _d1 = push_raw(&mut m, &delta("msg_0", 0, "Hello "));
+    let d2 = push_raw(&mut m, &delta("msg_9", 1, "world")); // rewrite to msg_0, idx 0
+    // d1 is identity (msg_0's own delta)
+    let d2_bytes = concat(d2);
+    let d2_str = std::str::from_utf8(&d2_bytes).unwrap();
+    assert!(
+        d2_str.contains(r#""item_id":"msg_0""#),
+        "d2 item_id rewritten: {d2_str}"
+    );
+    assert!(
+        d2_str.contains(r#""output_index":0"#),
+        "d2 output_index rewritten: {d2_str}"
+    );
+    assert!(
+        d2_str.contains(r#""delta":"world""#),
+        "d2 text unchanged: {d2_str}"
+    );
+}
+
+/// Spec W2: subsequent `content_part.added` from later fragments is
+/// suppressed (the first fragment's already emitted).
+#[test]
+fn w2_subsequent_content_part_added_suppressed() {
+    let mut m = FragmentedItemMerger::new(true);
+    let msg = |id: &str| {
+        sse(
+            "response.output_item.added",
+            &format!(
+                r#"{{"type":"response.output_item.added","output_index":0,"item":{{"type":"message","id":"{id}","role":"assistant","status":"in_progress","content":[]}}}}"#
+            ),
+        )
+    };
+    let part = |item_id: &str| {
+        sse(
+            "response.content_part.added",
+            &format!(
+                r#"{{"type":"response.content_part.added","item_id":"{item_id}","output_index":0,"part":{{"type":"output_text","text":""}}}}"#
+            ),
+        )
+    };
+    let _ = push_raw(&mut m, &msg("msg_0"));
+    let _ = push_raw(&mut m, &msg("msg_1"));
+    let p0 = push_raw(&mut m, &part("msg_0")); // first: pass through
+    let p1 = push_raw(&mut m, &part("msg_1")); // second: suppress
+    assert!(!p0.is_empty());
+    assert!(p1.is_empty(), "subsequent content_part.added suppressed");
+}
+
+/// Spec W3: subsequent-fragment `output_item.done` and `content_part.done`
+/// are suppressed (synthesized versions land at run boundary — Task 5
+/// later part / Task 6 verifies).
+#[test]
+fn w3_subsequent_dones_suppressed() {
+    let mut m = FragmentedItemMerger::new(true);
+    let msg = |id: &str| {
+        sse(
+            "response.output_item.added",
+            &format!(
+                r#"{{"type":"response.output_item.added","output_index":0,"item":{{"type":"message","id":"{id}","role":"assistant","status":"in_progress","content":[]}}}}"#
+            ),
+        )
+    };
+    let cpd = |item_id: &str| {
+        sse(
+            "response.content_part.done",
+            &format!(
+                r#"{{"type":"response.content_part.done","item_id":"{item_id}","output_index":0}}"#
+            ),
+        )
+    };
+    let oid = |item_id: &str| {
+        sse(
+            "response.output_item.done",
+            &format!(
+                r#"{{"type":"response.output_item.done","item_id":"{item_id}","output_index":0,"item":{{"type":"message","id":"{item_id}","status":"completed"}}}}"#
+            ),
+        )
+    };
+    let _ = push_raw(&mut m, &msg("msg_0"));
+    let _ = push_raw(&mut m, &msg("msg_1"));
+    let cpd_out = push_raw(&mut m, &cpd("msg_1"));
+    let oid_out = push_raw(&mut m, &oid("msg_1"));
+    assert!(cpd_out.is_empty(), "msg_1's content_part.done suppressed");
+    assert!(oid_out.is_empty(), "msg_1's output_item.done suppressed");
+}
+
+/// Spec W4: when a type switch flushes the run, the synthesized
+/// `content_part.done` carries the merged text accumulated from the run.
+#[test]
+fn w4_synthesized_content_part_done_carries_merged_text() {
+    let mut m = FragmentedItemMerger::new(true);
+    let msg = |id: &str| {
+        sse(
+            "response.output_item.added",
+            &format!(
+                r#"{{"type":"response.output_item.added","output_index":0,"item":{{"type":"message","id":"{id}","role":"assistant","status":"in_progress","content":[]}}}}"#
+            ),
+        )
+    };
+    let delta = |item_id: &str, text: &str| {
+        sse(
+            "response.output_text.delta",
+            &format!(
+                r#"{{"type":"response.output_text.delta","item_id":"{item_id}","output_index":0,"delta":"{text}"}}"#
+            ),
+        )
+    };
+    let rs = sse(
+        "response.output_item.added",
+        r#"{"type":"response.output_item.added","output_index":1,"item":{"type":"reasoning","id":"rs_0","summary":[{"type":"summary_text","text":""}]}}"#,
+    );
+    let _ = push_raw(&mut m, &msg("msg_0"));
+    let _ = push_raw(&mut m, &msg("msg_1")); // suppress; merge mode
+    let _ = push_raw(&mut m, &delta("msg_0", "Hi "));
+    let _ = push_raw(&mut m, &delta("msg_1", "there")); // rewrite
+    // Type switch to reasoning triggers run flush.
+    let rs_out = push_raw(&mut m, &rs);
+    let all: Vec<u8> = rs_out.into_iter().flat_map(|b| b.to_vec()).collect();
+    let all_str = std::str::from_utf8(&all).unwrap();
+    assert!(
+        all_str.contains("response.content_part.done"),
+        "synthesized cpd present: {all_str}"
+    );
+    assert!(
+        all_str.contains(r#""text":"Hi there""#),
+        "merged text 'Hi there' present: {all_str}"
+    );
+}
+
+/// Spec W5: the synthesized `output_item.done` item content has the
+/// merged text.
+#[test]
+fn w5_synthesized_output_item_done_has_merged_content() {
+    let mut m = FragmentedItemMerger::new(true);
+    let msg = |id: &str| {
+        sse(
+            "response.output_item.added",
+            &format!(
+                r#"{{"type":"response.output_item.added","output_index":0,"item":{{"type":"message","id":"{id}","role":"assistant","status":"in_progress","content":[]}}}}"#
+            ),
+        )
+    };
+    let delta = |item_id: &str, text: &str| {
+        sse(
+            "response.output_text.delta",
+            &format!(
+                r#"{{"type":"response.output_text.delta","item_id":"{item_id}","output_index":0,"delta":"{text}"}}"#
+            ),
+        )
+    };
+    let rs = sse(
+        "response.output_item.added",
+        r#"{"type":"response.output_item.added","output_index":1,"item":{"type":"reasoning","id":"rs_0","summary":[{"type":"summary_text","text":""}]}}"#,
+    );
+    let _ = push_raw(&mut m, &msg("msg_0"));
+    let _ = push_raw(&mut m, &msg("msg_1"));
+    let _ = push_raw(&mut m, &delta("msg_0", "abc"));
+    let _ = push_raw(&mut m, &delta("msg_1", "def"));
+    let rs_out = push_raw(&mut m, &rs);
+    let all: Vec<u8> = rs_out.into_iter().flat_map(|b| b.to_vec()).collect();
+    let all_str = std::str::from_utf8(&all).unwrap();
+    assert!(
+        all_str.contains("response.output_item.done"),
+        "synthesized oid present: {all_str}"
+    );
+    assert!(
+        all_str.contains(r#""text":"abcdef""#),
+        "merged content 'abcdef' present: {all_str}"
+    );
+}
