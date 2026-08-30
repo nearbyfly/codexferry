@@ -32,15 +32,22 @@ pub struct HealGates {
     /// Quirk `think_tags`: split leaked `<think>` markup onto the
     /// reasoning channel.
     pub think: bool,
+    /// Quirk `merge_fragmented`: collapse upstream Responses SSE runs of
+    /// same-type output items (e.g. MiniMax M3's per-chunk item
+    /// fragmentation, NOTES-2026-08-28 §2) into a single Responses-
+    /// conformant item. See
+    /// docs/superpowers/specs/2026-08-30-fragmented-items-merger-design.md.
+    pub merge_fragmented: bool,
 }
 
 impl Default for HealGates {
-    /// Both quirks default on: `[quirks] disabled = [...]` opts OUT, so the
+    /// All quirks default on: `[quirks] disabled = [...]` opts OUT, so the
     /// derived all-false default would silently disable healing everywhere.
     fn default() -> Self {
         HealGates {
             dsml: true,
             think: true,
+            merge_fragmented: true,
         }
     }
 }

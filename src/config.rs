@@ -755,6 +755,22 @@ format = "chat"
         assert!(!cfg.quirk_enabled("glm_thinking"));
         assert!(cfg.quirk_enabled("missing_done"));
     }
+
+    #[test]
+    fn merge_fragmented_defaults_to_enabled() {
+        let cfg = parse(BASE).unwrap();
+        assert!(cfg.quirk_enabled("merge_fragmented"));
+    }
+
+    #[test]
+    fn merge_fragmented_disables_via_list() {
+        let cfg = parse(&format!("{BASE}\n[quirks]\ndisabled = [\"merge_fragmented\"]\n"))
+            .unwrap();
+        assert!(!cfg.quirk_enabled("merge_fragmented"));
+        // other quirks unaffected
+        assert!(cfg.quirk_enabled("dsml_heal"));
+        assert!(cfg.quirk_enabled("think_tags"));
+    }
 }
 use tokio::sync::RwLock;
 
