@@ -45,7 +45,7 @@ pub(super) async fn handle_responses_format(
         crate::heal::HealGates {
             dsml: config.quirk_enabled("dsml_heal"),
             think: config.quirk_enabled("think_tags"),
-            merge_fragmented: false,
+            merge_fragmented: config.quirk_enabled("merge_fragmented"),
         }
     };
     let url = responses_url(&route.provider.base_url);
@@ -229,6 +229,16 @@ pub(super) async fn handle_responses_format(
                 // withheld tail released as a separate delta (the healer
                 // no-ops, so the relay is semantically verbatim but not
                 // byte-identical).
+                // Fragmented-items merger runs BEFORE the content healer:
+                // it normalizes the stream shape (collapsing same-type item
+                // runs into single Responses-conformant items), so the
+                // healer sees one canonical item per logical content unit.
+                // The two passes are orthogonal: the merger only touches
+                // item_id / output_index and done suppression; the healer
+                // does content-level DSML/think repair. See
+                // docs/superpowers/specs/2026-08-30-fragmented-items-merger-design.md
+                // §Design > Interaction with ResponsesStreamHealer.
+                let mut merger = crate::heal::FragmentedItemMerger::new(heal.merge_fragmented);
                 let mut healer = crate::heal::ResponsesStreamHealer::new(heal);
                 let mut events = Box::pin(crate::upstream::split_sse_events(stream));
                 'relay: loop {
@@ -258,18 +268,36 @@ pub(super) async fn handle_responses_format(
                             }
                         }
                     }
-                    for chunk in healer.push_event(&evt.raw, evt.event.as_deref(), &evt.data) {
-                        if tx.send(Ok(chunk.clone())).await.is_err() {
-                            client_disconnected = true;
-                            break 'relay; // client disconnected
-                        }
-                        let prev_len = raw.len();
-                        raw.extend_from_slice(&chunk);
-                        if !raw_trimmed && trim_completed_prefix(&mut raw, prev_len) {
-                            raw_trimmed = true;
+                    // Merger output is the canonical stream shape (per
+                    // spec §Design > Interaction with ResponsesStreamHealer):
+                    // upstream chunks flow merger -> healer -> client. The
+                    // merger output is intermediate — fed to the healer so
+                    // content-level DSML/think repair sees one canonical
+                    // item per logical unit (resolves review #5/#7
+                    // multi-item boundaries, NOTES §6.3). Only the
+                    // healer's output is sent to the client and into
+                    // `raw` (so session capture reflects what the client
+                    // actually saw). Sending both would duplicate every
+                    // event on length-1 runs; the S1-S3 composition
+                    // fixtures use this exact pattern.
+                    for chunk in merger.push_event(&evt.raw, evt.event.as_deref(), &evt.data) {
+                        for h_chunk in healer.push_event(&chunk, evt.event.as_deref(), &evt.data) {
+                            if tx.send(Ok(h_chunk.clone())).await.is_err() {
+                                client_disconnected = true;
+                                break 'relay; // client disconnected
+                            }
+                            let prev_len = raw.len();
+                            raw.extend_from_slice(&h_chunk);
+                            if !raw_trimmed && trim_completed_prefix(&mut raw, prev_len) {
+                                raw_trimmed = true;
+                            }
                         }
                     }
                 }
+                // Flush the healer at stream end (merger.finish() is a
+                // no-op by spec γ-1: never synthesize `output_item.done`
+                // at finish; passthrough's `response.failed` handles
+                // truncated turns).
                 for chunk in healer.finish() {
                     if tx.send(Ok(chunk.clone())).await.is_err() {
                         client_disconnected = true;

@@ -442,6 +442,13 @@ impl FragmentedItemMerger {
     /// `finish()`. Passthrough's `response.failed` event handles
     /// truncated turns. `on_completed` flushes synthesized done from
     /// active runs on the `response.completed` boundary instead.
+    ///
+    /// `#[cfg_attr(not(test), allow(dead_code))]`: passthrough's
+    /// streaming loop deliberately omits the call (γ-1 — the method
+    /// exists for API symmetry with `ResponsesStreamHealer` and for
+    /// direct unit-test invocation, not for the relay loop). Tests
+    /// exercise it (see E3).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn finish(&mut self) -> Vec<Bytes> {
         self.run = None;
         Vec::new()
