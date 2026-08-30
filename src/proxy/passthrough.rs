@@ -45,6 +45,7 @@ pub(super) async fn handle_responses_format(
         crate::heal::HealGates {
             dsml: config.quirk_enabled("dsml_heal"),
             think: config.quirk_enabled("think_tags"),
+            merge_fragmented: false,
         }
     };
     let url = responses_url(&route.provider.base_url);
