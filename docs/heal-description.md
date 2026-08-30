@@ -174,7 +174,7 @@ think 解析细节：
 | 子类 | 流形状修复（与内容修复正交）|
 | 适用路径 | **responses only**（chat 是构造者姿态，天然不碎片）|
 | 触发条件 | 连续同类型 `output_item.added`：`message` / `reasoning` 同 type 直接合并；`function_call` 额外要求 `call_id` 匹配（OpenAI 契约：同 call 必须同 item）|
-| 修复做法 | 把 N 个连续同类型 item 折回 1 个：第 1 个原样透传、后续 N-1 个 added 抑制、deltas 重写 `item_id`/`output_index` 为首碎片、累积 merged_* 文本、run 末尾 flush 合成 `content_part.done` + `output_item.done` |
+| 修复做法 | 把 N 个连续同类型 item 折回 1 个：第 1 个原样透传、后续 N-1 个 added 抑制、deltas 重写 `item_id`/`output_index` 为首碎片、累积 merged_* 文本、run 末尾 flush 合成 `content_part.done` (Message items) + `output_item.done` (Reasoning/FunctionCall items) |
 | 状态位 | `HealGates::merge_fragmented: bool`，默认 `true` |
 | Hook 点 | `src/proxy/passthrough.rs` 的 healed 分支，**插在 `ResponsesStreamHealer` 前面** |
 | 与 healer 的关系 | D-1：merger 只管形状，healer 只管内容。merger 改写后 healer 看到「真的只有一个 item」——**消除了 review #5/#7 的 multi-item 边界** |
@@ -187,8 +187,8 @@ NOTES 调查：`NOTES-2026-08-28-minimax-m3-fragmentation.md`（git-exclude，�
 ## 7. heal 模块目录结构
 
 ```
-src/heal/                          共 3584 行（含测试）
-├── mod.rs                          63   HealGates 门面 + 默认全 ON
+src/heal/                          共 3830 行（含测试）
+├── mod.rs                          78   HealGates 门面 + 默认全 ON
 ├── dsml.rs                        677   DsmlStreamFilter + heal_dsml_chat_message
 ├── dsml_tests.rs                  386   + parse_leaked_tool_calls + 双 dialect
 ├── think.rs                       192   ThinkStreamFilter + heal_think_chat_message
@@ -196,11 +196,11 @@ src/heal/                          共 3584 行（含测试）
 ├── merge.rs                       463   FragmentedItemMerger + ItemType + RunState
 ├── merge_tests.rs                 544   M1–M9 / W1–W5 / E1–E4 / S1–S3 / K1 fixtures
 ├── responses.rs                   611   ResponsesStreamHealer（流式）
-└── responses_healer_tests.rs      496   + heal_responses_body（非流式）
+└── responses_healer_tests.rs      727   + heal_responses_body（非流式）
                                     + INJECT_INDEX_BASE = 10_000
 ```
 
-`quirks.rs`（顶层 src/，63 行）放 `QUIRK_NAMES` 注册表与
+`quirks.rs`（顶层 src/，64 行）放 `QUIRK_NAMES` 注册表与
 `is_glm_like_model`，不属于 `heal/` 模块，但提供注册与模型名匹配。
 
 ## 8. 两个 state machine 字段对照
