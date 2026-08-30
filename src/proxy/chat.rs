@@ -46,6 +46,7 @@ pub(super) async fn handle_chat_format(
             crate::heal::HealGates {
                 dsml: config.quirk_enabled("dsml_heal"),
                 think: config.quirk_enabled("think_tags"),
+            merge_fragmented: config.quirk_enabled("merge_fragmented"),
             },
             config.quirk_enabled("missing_done"),
         )
