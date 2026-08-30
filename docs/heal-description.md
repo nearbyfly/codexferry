@@ -187,20 +187,20 @@ NOTES 调查：`NOTES-2026-08-28-minimax-m3-fragmentation.md`（git-exclude，�
 ## 7. heal 模块目录结构
 
 ```
-src/heal/                          共 3830 行（含测试）
+src/heal/                          共 3987 行（含测试）
 ├── mod.rs                          78   HealGates 门面 + 默认全 ON
 ├── dsml.rs                        677   DsmlStreamFilter + heal_dsml_chat_message
 ├── dsml_tests.rs                  386   + parse_leaked_tool_calls + 双 dialect
 ├── think.rs                       192   ThinkStreamFilter + heal_think_chat_message
 ├── think_tests.rs                 152   + contains_think_markup
-├── merge.rs                       463   FragmentedItemMerger + ItemType + RunState
-├── merge_tests.rs                 544   M1–M9 / W1–W5 / E1–E4 / S1–S3 / K1 fixtures
+├── merge.rs                       452   FragmentedItemMerger + ItemType + RunState
+├── merge_tests.rs                 594   M1–M9 / W1–W5 / E1–E4 / S1–S3 / K1 fixtures
 ├── responses.rs                   611   ResponsesStreamHealer（流式）
-└── responses_healer_tests.rs      727   + heal_responses_body（非流式）
+└── responses_healer_tests.rs      845   + heal_responses_body（非流式）
                                     + INJECT_INDEX_BASE = 10_000
 ```
 
-`quirks.rs`（顶层 src/，64 行）放 `QUIRK_NAMES` 注册表与
+`quirks.rs`（顶层 src/，70 行）放 `QUIRK_NAMES` 注册表与
 `is_glm_like_model`，不属于 `heal/` 模块，但提供注册与模型名匹配。
 
 ## 8. 两个 state machine 字段对照

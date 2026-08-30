@@ -528,30 +528,39 @@ fn s1_merged_run_dsml_healer_strips() {
         all
     };
 
+    // Returns `(raw, data)` so the merger actually starts a tracked run.
+    // Previously this returned only the raw bytes and the test fed an empty
+    // string as `data`, which made `merger.on_added` fall through to
+    // identity (parse failure) — the merger never tracked the run and the
+    // merger+healer composition wasn't exercised (final-review fix #3).
     let added = |idx: usize, id: &str| {
-        String::from(
-            &format!(
-                "event: response.output_item.added\n\
-         data: {{\"type\":\"response.output_item.added\",\"output_index\":{idx},\
-         \"item\":{{\"type\":\"message\",\"id\":\"{id}\",\"role\":\"assistant\",\
-         \"status\":\"in_progress\",\"content\":[]}}}}\n\n"
-            )[..],
-        )
+        let data = format!(
+            r#"{{"type":"response.output_item.added","output_index":{idx},\
+"item":{{"type":"message","id":"{id}","role":"assistant",\
+"status":"in_progress","content":[]}}}}"#
+        );
+        let raw = format!(
+            "event: response.output_item.added\n\
+         data: {data}\n\n"
+        );
+        (raw, data)
     };
 
+    let (raw0, data0) = added(0, "msg_0");
     let _ = feed(
         &mut merger,
         &mut healer,
-        &added(0, "msg_0"),
+        &raw0,
         "response.output_item.added",
-        "",
+        &data0,
     );
+    let (raw1, data1) = added(1, "msg_1");
     let _ = feed(
         &mut merger,
         &mut healer,
-        &added(1, "msg_1"),
+        &raw1,
         "response.output_item.added",
-        "",
+        &data1,
     );
 
     let delta1 = "event: response.output_text.delta\n\
@@ -652,23 +661,31 @@ fn s2_merged_run_think_healer_splits_reasoning() {
         all
     };
 
+    // Returns `(raw, data)` so the merger actually starts a tracked run.
+    // Previously this returned only the raw bytes and the test fed an empty
+    // string as `data`, which made `merger.on_added` fall through to
+    // identity (parse failure) — the merger never tracked the run and the
+    // merger+healer composition wasn't exercised (final-review fix #3).
     let added = |idx: usize, id: &str| {
-        String::from(
-            &format!(
-                "event: response.output_item.added\n\
-         data: {{\"type\":\"response.output_item.added\",\"output_index\":{idx},\
-         \"item\":{{\"type\":\"message\",\"id\":\"{id}\",\"role\":\"assistant\",\
-         \"status\":\"in_progress\",\"content\":[]}}}}\n\n"
-            )[..],
-        )
+        let data = format!(
+            r#"{{"type":"response.output_item.added","output_index":{idx},\
+"item":{{"type":"message","id":"{id}","role":"assistant",\
+"status":"in_progress","content":[]}}}}"#
+        );
+        let raw = format!(
+            "event: response.output_item.added\n\
+         data: {data}\n\n"
+        );
+        (raw, data)
     };
 
+    let (raw0, data0) = added(0, "msg_0");
     let _ = feed(
         &mut merger,
         &mut healer,
-        &added(0, "msg_0"),
+        &raw0,
         "response.output_item.added",
-        "",
+        &data0,
     );
 
     let delta1 = "event: response.output_text.delta\n\
@@ -780,30 +797,39 @@ fn s3_merged_run_both_quirks_heal() {
         all
     };
 
+    // Returns `(raw, data)` so the merger actually starts a tracked run.
+    // Previously this returned only the raw bytes and the test fed an empty
+    // string as `data`, which made `merger.on_added` fall through to
+    // identity (parse failure) — the merger never tracked the run and the
+    // merger+healer composition wasn't exercised (final-review fix #3).
     let added = |idx: usize, id: &str| {
-        String::from(
-            &format!(
-                "event: response.output_item.added\n\
-         data: {{\"type\":\"response.output_item.added\",\"output_index\":{idx},\
-         \"item\":{{\"type\":\"message\",\"id\":\"{id}\",\"role\":\"assistant\",\
-         \"status\":\"in_progress\",\"content\":[]}}}}\n\n"
-            )[..],
-        )
+        let data = format!(
+            r#"{{"type":"response.output_item.added","output_index":{idx},\
+"item":{{"type":"message","id":"{id}","role":"assistant",\
+"status":"in_progress","content":[]}}}}"#
+        );
+        let raw = format!(
+            "event: response.output_item.added\n\
+         data: {data}\n\n"
+        );
+        (raw, data)
     };
 
+    let (raw0, data0) = added(0, "msg_0");
     let _ = feed(
         &mut merger,
         &mut healer,
-        &added(0, "msg_0"),
+        &raw0,
         "response.output_item.added",
-        "",
+        &data0,
     );
+    let (raw1, data1) = added(1, "msg_1");
     let _ = feed(
         &mut merger,
         &mut healer,
-        &added(1, "msg_1"),
+        &raw1,
         "response.output_item.added",
-        "",
+        &data1,
     );
 
     // Think marker before DSML: think filter fires, think content extracted.

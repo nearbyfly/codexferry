@@ -281,7 +281,39 @@ pub(super) async fn handle_responses_format(
                     // event on length-1 runs; the S1-S3 composition
                     // fixtures use this exact pattern.
                     for chunk in merger.push_event(&evt.raw, evt.event.as_deref(), &evt.data) {
-                        for h_chunk in healer.push_event(&chunk, evt.event.as_deref(), &evt.data) {
+                        // Re-derive (event, data) from the merger-rewritten
+                        // chunk so the content heater sees the MERGER's
+                        // payload, not the upstream's. Without this re-parse:
+                        //  - a rewritten delta would carry `item_id: msg_0`
+                        //    in the chunk but `item_id: msg_N` in the data
+                        //    the heater parses, so `message_item_id` tracks
+                        //    the unmerged upstream id and every later rewrite
+                        //    goes to the wrong item (review finding #1a);
+                        //  - synthesized `content_part.done` /
+                        //    `output_item.done` chunks would be dispatched
+                        //    as the upstream event (`evt.event`), bypassing
+                        //    the text-rewrite arms entirely (finding #1b);
+                        //  - the synthesized `content_part.done` would ship
+                        //    raw DSML/think markup because the heater never
+                        //    sees it as a `content_part.done` (finding #1c);
+                        //  - `response.completed` would re-run
+                        //    `rewrite_completed` 3× — once for each
+                        //    synthesized done and once for the raw completed
+                        //    (finding #1d, triplicated `response.completed`).
+                        // Fall back to the upstream (event, data) if the
+                        // chunk somehow doesn't parse — defensive, the
+                        // merger always emits a well-formed SSE block.
+                        let (m_event, m_data) = crate::upstream::parse_sse_block(&chunk);
+                        let heal_event: &str;
+                        let heal_data: &str;
+                        if let Some(name) = m_event.as_ref() {
+                            heal_event = name.as_str();
+                            heal_data = m_data.as_str();
+                        } else {
+                            heal_event = evt.event.as_deref().unwrap_or("");
+                            heal_data = evt.data.as_str();
+                        }
+                        for h_chunk in healer.push_event(&chunk, Some(heal_event), heal_data) {
                             if tx.send(Ok(h_chunk.clone())).await.is_err() {
                                 client_disconnected = true;
                                 break 'relay; // client disconnected
