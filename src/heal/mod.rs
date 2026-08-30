@@ -54,10 +54,16 @@ impl Default for HealGates {
 
 mod dsml;
 mod responses;
+mod merge;
 mod think;
 
 pub use dsml::{heal_dsml_chat_message, parse_leaked_tool_calls, DsmlStreamFilter, DsmlToolCall};
 pub use responses::{heal_responses_body, ResponsesStreamHealer};
+// FragmentedItemMerger is consumed by `passthrough.rs`'s streaming loop
+// (wired in Task 8). Until then the re-export would warn as unused;
+// suppress with a scoped attribute so Task 2's build stays clean.
+#[allow(unused_imports)]
+pub use merge::FragmentedItemMerger;
 pub use think::{contains_think_markup, heal_think_chat_message, ThinkSplit, ThinkStreamFilter};
 
 pub(crate) use dsml::synthesize_call_id;
@@ -66,5 +72,7 @@ pub(crate) use dsml::synthesize_call_id;
 mod dsml_tests;
 #[cfg(test)]
 mod responses_healer_tests;
+#[cfg(test)]
+mod merge_tests;
 #[cfg(test)]
 mod think_tests;
