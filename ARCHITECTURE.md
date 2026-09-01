@@ -333,7 +333,7 @@ codexferry/
 │   ├── e2e-lib.sh           # E2E shared helpers: sandbox selection + run_codex + doctor assertions (336)
 │   ├── e2e.sh               # deterministic E2E layer: basic/models/tools/multiturn + doctor scenarios (443)
 │   ├── e2e-real.sh          # opt-in real-provider smoke; refuses sandbox bypass (140)
-│   ├── coverage.sh          # cargo-llvm-cov wrappers: unit/integration/e2e coverage flows (110)
+│   ├── coverage.sh          # cargo-llvm-cov wrappers: unit/integration/e2e coverage flows (119)
 │   ├── codex-config-dynamic.toml.example  # Codex CLI side: live /models catalog via auth.command (47)
 │   └── codex-config-static.toml.example   # Codex CLI side: pinned gen-catalog file (34)
 ├── docs/superpowers/
