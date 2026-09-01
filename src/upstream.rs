@@ -63,27 +63,35 @@ where
     S: Stream<Item = Result<Bytes, reqwest::Error>> + Unpin,
 {
     futures_util::stream::unfold(
-        (stream, Vec::<u8>::new()),
-        |(mut stream, mut buffer)| async move {
+        (stream, Vec::<u8>::new(), 0usize),
+        |(mut stream, mut buffer, mut resume)| async move {
             loop {
                 // Check the buffer for a complete event before requesting more
-                // data, so already-buffered events are drained eagerly.
-                if let Some((offset, delim_len)) = find_event_boundary(&buffer) {
+                // data, so already-buffered events are drained eagerly. The
+                // scan resumes at `resume` — the offset from which no boundary
+                // can exist — instead of re-scanning the whole buffer per
+                // chunk (O(n²) for one huge event).
+                if let Some((offset, delim_len)) = find_event_boundary(&buffer, resume) {
                     // Split off everything up to (and including) the delimiter:
                     // the prefix is this event's text, the tail is kept as the
                     // buffer for the next event.
                     let tail = buffer.split_off(offset + delim_len);
                     let event_str = String::from_utf8_lossy(&buffer[..offset]).into_owned();
                     buffer = tail;
+                    // The tail has not been scanned yet.
+                    resume = 0;
                     let event = parse_sse_event(&event_str);
                     if let Some(evt) = event {
-                        return Some((evt, (stream, buffer)));
+                        return Some((evt, (stream, buffer, resume)));
                     }
                     // Comment or empty, continue
                     continue;
                 }
                 // No complete event in the buffer yet: wait for the next
-                // upstream chunk and append its raw bytes.
+                // upstream chunk and append its raw bytes. Only the overlap
+                // window (longest delimiter − 1) before the old end needs
+                // re-scanning afterwards.
+                resume = buffer.len().saturating_sub(MAX_DELIM_LEN - 1);
                 match stream.next().await {
                     Some(Ok(chunk)) => buffer.extend_from_slice(&chunk),
                     // Transport error: log and terminate the SSE stream.
@@ -99,7 +107,7 @@ where
                             let event_str = String::from_utf8_lossy(&buffer).into_owned();
                             buffer.clear();
                             if let Some(evt) = parse_sse_event(&event_str) {
-                                return Some((evt, (stream, buffer)));
+                                return Some((evt, (stream, buffer, resume)));
                             }
                         }
                         return None;
@@ -142,15 +150,20 @@ where
     S: Stream<Item = Result<Bytes, reqwest::Error>> + Unpin,
 {
     futures_util::stream::unfold(
-        (stream, Vec::<u8>::new()),
-        |(mut stream, mut buffer)| async move {
+        (stream, Vec::<u8>::new(), 0usize),
+        |(mut stream, mut buffer, mut resume)| async move {
             // Buffer grows without bound while no delimiter arrives — same
             // inherited discipline as `parse_sse_stream`; do not "fix" it.
+            // The boundary scan resumes at `resume` (see
+            // [`find_event_boundary`]) instead of re-scanning the whole
+            // buffer per chunk.
             loop {
-                if let Some((offset, delim_len)) = find_event_boundary(&buffer) {
+                if let Some((offset, delim_len)) = find_event_boundary(&buffer, resume) {
                     let raw: Vec<u8> = buffer.drain(..offset + delim_len).collect();
-                    return Some((parse_preserved_event(raw), (stream, buffer)));
+                    resume = 0; // the remaining tail is unscanned
+                    return Some((parse_preserved_event(raw), (stream, buffer, resume)));
                 }
+                resume = buffer.len().saturating_sub(MAX_DELIM_LEN - 1);
                 match stream.next().await {
                     Some(Ok(chunk)) => buffer.extend_from_slice(&chunk),
                     Some(Err(e)) => {
@@ -160,7 +173,7 @@ where
                     None => {
                         if buffer.iter().any(|b| !b.is_ascii_whitespace()) {
                             let raw = std::mem::take(&mut buffer);
-                            return Some((parse_preserved_event(raw), (stream, buffer)));
+                            return Some((parse_preserved_event(raw), (stream, buffer, resume)));
                         }
                         return None;
                     }
@@ -224,23 +237,38 @@ fn parse_preserved_event(raw: Vec<u8>) -> PreservedSseEvent {
     }
 }
 
-/// Find the first SSE event delimiter in the buffer.
+/// Length of the longest SSE event delimiter accepted (`\r\n\r\n`).
+const MAX_DELIM_LEN: usize = 4;
+
+/// Find the first SSE event delimiter in `buffer[start..]`, where `start`
+/// is the resume offset supplied by the caller.
 ///
 /// Supports both `\n\n` (length 2) and CRLF `\r\n\r\n` (length 4) delimiters,
-/// returning whichever occurs first as `(offset, len)`.
+/// returning whichever occurs first as `(offset, len)` in WHOLE-buffer
+/// coordinates.
 ///
-/// Both delimiter types are located with a windowed byte scan; when both are
-/// present, the one whose delimiter starts earliest in the buffer wins. A bare
-/// `\n\n` can never match inside a CRLF `\r\n\r\n` pair (the second `\n`
-/// would have to follow the first, but there it follows `\r`), so CRLF events
-/// are never split on a partial match. `None` means the buffer does not yet
-/// contain a complete event.
-fn find_event_boundary(buffer: &[u8]) -> Option<(usize, usize)> {
-    let lf = buffer.windows(2).position(|w| w == b"\n\n").map(|p| (p, 2));
-    let crlf = buffer
+/// Incremental-scan contract: a delimiter starting at a position < `start`
+/// either was already found (the caller emitted and reset `start = 0`) or is
+/// impossible — the caller only advances `start` to `len - (MAX_DELIM_LEN - 1)`
+/// after a scan that found nothing, and any delimiter starting at or beyond
+/// that point overlaps bytes appended since. Both delimiter types are
+/// located with a windowed byte scan; when both are present, the one whose
+/// delimiter starts earliest in the buffer wins. A bare `\n\n` can never
+/// match inside a CRLF `\r\n\r\n` pair (the second `\n` would have to
+/// follow the first, but there it follows `\r`), so CRLF events are never
+/// split on a partial match. `None` means the buffer does not yet contain a
+/// complete event.
+fn find_event_boundary(buffer: &[u8], start: usize) -> Option<(usize, usize)> {
+    let start = start.min(buffer.len());
+    let hay = &buffer[start..];
+    let lf = hay
+        .windows(2)
+        .position(|w| w == b"\n\n")
+        .map(|p| (p + start, 2));
+    let crlf = hay
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
-        .map(|p| (p, 4));
+        .map(|p| (p + start, 4));
     match (lf, crlf) {
         (Some(a), Some(b)) => Some(if a.0 <= b.0 { a } else { b }),
         (Some(a), None) => Some(a),
@@ -488,6 +516,42 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].event.as_deref(), Some("a"));
         assert_eq!(events[1].event.as_deref(), Some("b"));
+    }
+
+    /// Regression for the incremental boundary scan (P2): feeding the stream
+    /// ONE BYTE AT A TIME walks the resume offset through every position,
+    /// including delimiters whose start lands inside the
+    /// `MAX_DELIM_LEN - 1` overlap window before the previously-scanned
+    /// end. Both parsers must yield the same events as a single-chunk feed.
+    #[tokio::test]
+    async fn byte_by_byte_feed_finds_all_boundaries() {
+        let input: Vec<&[u8]> = b"data: a\r\n\r\ndata: b\n\ndata: c\r\n\r\n"
+            .chunks(1)
+            .collect();
+        // The chat-path parser (data payloads only).
+        let events = collect_data(parse_sse_stream(iter_stream(input.clone()))).await;
+        assert_eq!(events, vec!["a", "b", "c"]);
+        // The structure-preserving splitter (raw + event names).
+        let preserved = preserved_items(input).await;
+        assert_eq!(preserved.len(), 3);
+        assert_eq!(preserved[0].data, "a");
+        assert_eq!(preserved[1].data, "b");
+        assert_eq!(preserved[2].data, "c");
+    }
+
+    /// A delimiter STARTING exactly at the resume offset (old_len − 3) must
+    /// still be found: `...\n\n` then a chunk beginning `\r\n\r\n`.
+    #[tokio::test]
+    async fn crlf_delimiter_starting_at_resume_offset_is_found() {
+        // Chunk 1 ends right after a \n\n event; chunk 2 STARTS with a
+        // \r\n\r\n whose first byte sits exactly at the resume window start
+        // of the post-chunk-1 buffer.
+        let events =
+            preserved_items(vec![b"data: a\n\ndata: b", b"\r\n\r\n", b"data: c\n\n"]).await;
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].data, "a");
+        assert_eq!(events[1].data, "b");
+        assert_eq!(events[2].data, "c");
     }
 
     #[tokio::test]

@@ -6,8 +6,8 @@
 request paths (session store, both proxy handlers, SSE parser, hot-reload
 watcher) and a parallel sweep of the periphery (catalog, models_cache,
 metrics, convert, normalize, config validation).
-**Status:** §1 (Thread / Concurrency, C1–C4) fixed 2026-09-01; §2 and §3
-open.
+**Status:** §1 (Thread / Concurrency, C1–C4) fixed 2026-09-01;
+§2 (Performance, P1–P4) fixed 2026-09-01; §3 open.
 
 Overall: the architecture is clean, degradation paths are well covered, and
 the docs/code sync is unusually good. The hot-reload channel+applier design,
@@ -95,7 +95,7 @@ The first assert is now the intent-preserving `CALLS <= 2` (gate still closed:
 a second refresh cannot have started); the deterministic post-barrier `== 2`
 assert is unchanged.
 
-## 2. Performance
+## 2. Performance — FIXED 2026-09-01
 
 ### P1 (high) — session store re-serializes the ENTIRE store on every save
 
@@ -106,9 +106,11 @@ potentially hundreds of MB of serde serialization per request, and the
 byte-budget `while` loop re-runs the full scan after each eviction. This is
 the single largest performance item in the repo.
 
-**Fix:** maintain a running byte counter on `SessionState`, updated
-incrementally on insert/remove; compute only the new entry's size at save
-time.
+**Fix (applied):** `SessionEntry` caches its size estimate at insert time
+and `SessionState` keeps a running `total_bytes`; `enforce_limits` is O(1)
+per save, and all removal paths (eviction, expiry, replace) route through
+one `remove_entry` helper that decrements the counter. New tests: budget
+eviction order and replace-does-not-leak-bytes.
 
 ### P2 (low-medium) — SSE boundary scan restarts from buffer index 0 on every chunk
 
@@ -119,13 +121,24 @@ already implements the correct incremental discipline (resume from
 `prev_len - marker_len + 1`); the parser should do the same. Low daily impact
 since events are small, but the fix pattern already exists in-repo.
 
+**Fix (applied):** the unfold state of BOTH parsers carries a `resume`
+offset; after a no-boundary scan it advances to `len - (MAX_DELIM_LEN - 1)`
+and the next scan covers only the overlap window plus the appended chunk.
+Emitting an event resets `resume = 0` (the tail is unscanned). New
+regression fixtures: a byte-by-byte CRLF/LF feed through both parsers, and
+a delimiter starting exactly at the resume offset.
+
 ### P3 (low) — per-chunk heap allocations on the "zero-overhead" verbatim fast path
 
 `proxy/mod.rs:160-179` `first_content_event_bytes` allocates a haystack Vec
 plus a new carry Vec per chunk, then window-scans for 3 markers. This is the
 only per-chunk allocation on the verbatim relay path.
 
-**Fix:** scan in place over carry (capped at 37 bytes) + chunk, or use memchr.
+**Fix (applied):** the scan is now allocation-free without changing the
+signature: markers fully inside `carry` are provably found by the previous
+call (the carry is that call's scanned tail), so only `chunk` windows and
+the cross-boundary carry-suffix + chunk-prefix stitches are compared; the
+carry update reuses the Vec's capacity (`clear`/`drain` + `extend`).
 
 ### P4 (low) — chat path triple-transforms the request body
 
@@ -134,7 +147,13 @@ field surgery → `serde_json::to_vec(&chat_body)` (re-serialize). With codex
 replaying full transcripts inline, that is two MB-scale temporary
 materializations per request.
 
-**Fix:** let `send_upstream` accept a `Value` and serialize once.
+**Fix (applied):** when neither `drop_params` nor `extra_params` is
+configured (the common case), the typed request is serialized straight to
+bytes — one traversal, no Value tree. The Value-surgery path is kept only
+for providers that actually configure the escape hatches. (Routing the
+single serialization inside `send_upstream` was considered and rejected:
+it does not reduce the traversal count, since the surgery needs the Value
+form either way.)
 
 ## 3. Edge Cases
 

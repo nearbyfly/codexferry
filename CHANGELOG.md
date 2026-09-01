@@ -35,6 +35,23 @@ release is cut, so both remotes receive it through the normal push flow.
   Hot-reloadable. Responses-format path only — chat-format path is
   naturally unfragmented.
 
+### Performance
+
+- **Session store**: the memory budget no longer re-serializes every cached
+  session on every save — entries cache their size estimate and the store
+  keeps a running byte total (O(1) budget check per turn; previously O(total
+  stored bytes) of JSON serialization per request).
+- **SSE parsers**: event-boundary scans are incremental — after a chunk
+  arrives, only the small overlap window before the previously-scanned end
+  is re-examined, instead of rescanning the whole buffer (O(n²) for one
+  huge event).
+- **Passthrough fast path**: first-content (TTFT) marker detection no longer
+  allocates per relayed chunk.
+- **Chat path**: when a provider configures neither `drop_params` nor
+  `extra_params`, the outbound request body is serialized directly from the
+  typed request — no intermediate `serde_json::Value` tree of the
+  (potentially transcript-sized) body.
+
 ### Spec
 
 `docs/superpowers/specs/2026-08-30-fragmented-items-merger-design.md`.
