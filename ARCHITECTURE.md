@@ -342,35 +342,37 @@ codexferry/
 │   ├── main.rs             # CLI entry (clap) (175)
 │   ├── bin/
 │   │   └── e2e-mock.rs     # scripted mock upstream for the E2E scripts (379)
-│   ├── config.rs           # TOML types + validation + hot reload (1,240)
-│   ├── doctor.rs           # doctor: mode-aware offline quick-checks (L1 config/wiring/mode/version status + L2.6 version age, mode-keyed advisories, pinned L2.7–L2.10 pin checks, dynamic L2.7' pin-shadow WARN + L2.8'/L2.9' endpoint smoke/shape) + WARN/INFO/FAIL report/exit codes (2,499)
+│   ├── config.rs           # TOML types + validation + hot reload (1,258)
+│   ├── doctor.rs           # doctor: mode-aware offline quick-checks (L1 config/wiring/mode/version status + L2.6 version age, mode-keyed advisories, pinned L2.7–L2.10 pin checks, dynamic L2.7' pin-shadow WARN + L2.8'/L2.9' endpoint smoke/shape) + WARN/INFO/FAIL report/exit codes (2,495)
 │   ├── doctor_live.rs      # doctor --live: mode-aware L3 live probe (wiring mirrors the detected mode; live-catalog-fetch proof) — returns checks (1,241)
 │   ├── mode.rs             # codex wiring mode detection: pinned/dynamic/fallback (191)
 │   ├── version.rs          # codex client-version tripwire (`CodexVersionTracker`) + doctor state (383)
 │   ├── proxy/
-│   │   ├── mod.rs             # axum routing + dispatch + client-version observation (841)
-│   │   ├── chat.rs            # chat-format handler (515)
-│   │   ├── passthrough.rs     # responses-format relay (472)
+│   │   ├── mod.rs             # axum routing + dispatch + client-version observation (842)
+│   │   ├── chat.rs            # chat-format handler (516)
+│   │   ├── passthrough.rs     # responses-format relay (healed passthrough + merger wiring) (538)
 │   │   ├── upstream.rs        # send_upstream + error-class dedup helpers (150)
 │   │   ├── capture.rs         # session/usage capture (164)
 │   │   │   └── tests.rs       # capture unit tests (178)
-│   │   ├── tests.rs           # unit tests (252)
-│   │   └── metrics_route_tests.rs  # metrics route unit tests (43)
-│   ├── quirks.rs           # quirk names + GLM matcher (63)
+│   │   ├── tests.rs           # unit tests (395)
+│   │   └── metrics_route_tests.rs  # metrics route unit tests (44)
+│   ├── quirks.rs           # quirk names + GLM matcher (70)
 │   ├── heal/
-│   │   ├── mod.rs           # HealGates + facade re-exports (63)
+│   │   ├── mod.rs           # HealGates + facade re-exports (78)
 │   │   ├── think.rs         # think-tag healing (192)
 │   │   ├── think_tests.rs   # think-tag healing unit tests (152)
 │   │   ├── dsml.rs          # DSML tool-call healing (677)
 │   │   ├── dsml_tests.rs    # DSML healing unit tests (386)
+│   │   ├── merge.rs         # fragmented-items merger (merge_fragmented heal pass for MiniMax M3 Responses) (600)
+│   │   ├── merge_tests.rs   # fragmented-items merger unit tests + merger+healer composition (S1–S3, F1–F5) (1008)
 │   │   ├── responses.rs     # Responses passthrough healer (611)
-│   │   └── responses_healer_tests.rs  # responses healer unit tests (496)
+│   │   └── responses_healer_tests.rs  # responses healer unit tests (871)
 │   ├── session.rs          # SessionStore (340)
-│   ├── upstream.rs         # SSE parser + key resolution (623)
+│   ├── upstream.rs         # SSE parser + key resolution (parse_sse_block + parse_preserved_event) (652)
 │   ├── catalog.rs          # gen-catalog + build_catalog_value + bundled-model hide-override discovery (1,198)
-│   ├── models_cache.rs     # CatalogCache: route-fingerprint + template-mtime invalidation for live /models; and, when `hide_bundled_models` is on, re-probes `codex debug models --bundled` on the same 60s cadence (739)
+│   ├── models_cache.rs     # CatalogCache: route-fingerprint + template-mtime invalidation for live /models; and, when `hide_bundled_models` is on, re-probes `codex debug models --bundled` on the same 60s cadence (740)
 │   ├── logging.rs          # tracing init (36)
-│   ├── metrics.rs          # Prometheus metrics registry + /metrics encoding (369)
+│   ├── metrics.rs          # Prometheus metrics registry + /metrics encoding (407)
 │   ├── normalize.rs        # boundary normalization (hoist, namespace flatten + chat-name encode/decode map, unknown-type visibility) (452)
 │   │   └── tests.rs        # normalization unit tests (446)
 │   ├── wire/
@@ -385,9 +387,9 @@ codexferry/
 │       │   ├── stream_tests.rs  # stream conversion unit tests (1,045)
 │       │   └── tests.rs   # response conversion unit tests (217)
 └── tests/
-    ├── common/mod.rs         # shared harness (1,118)
+    ├── common/mod.rs         # shared harness (1,272)
     ├── chat_conversion.rs    # chat-path conversion tests (691)
-    ├── passthrough.rs        # responses-format relay tests (438)
+    ├── passthrough.rs        # responses-format relay tests (incl. fragmented-run merger scenarios) (669)
     ├── healing.rs            # dsml/think leak healing tests (352)
     ├── sessions.rs           # cross-turn session tests (197)
     └── endpoints_metrics.rs  # healthz, models, metrics, doctor tests (855)
@@ -396,6 +398,6 @@ codexferry/
 > Line counts are approximate and include comments; they drift as the code evolves.
 > Update them when making significant changes.
 
-~23,684 lines total across the scripts/, src/ and tests/ files above. 442 tests
-(398 unit + 5 e2e-mock unit + 38 integration passing + 1 ignored live-probe
+~25,506 lines total across the scripts/, src/ and tests/ files above. 470 tests
+(425 unit + 5 e2e-mock unit + 40 integration passing + 1 ignored live-probe
 test).

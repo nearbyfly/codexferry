@@ -805,6 +805,7 @@ async fn extract_error_detail(resp: Response) -> (Response, Option<String>) {
 /// Uses explicit `%`-style Display field assignments (AGENTS.md #3) because the
 /// route/upstream/model values are borrowed `&str`s rather than locals that
 /// could be auto-captured with `{field}` placeholders.
+#[allow(clippy::too_many_arguments)]
 fn log_request(
     route: &str,
     upstream: &str,

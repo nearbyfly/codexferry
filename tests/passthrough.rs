@@ -436,3 +436,234 @@ timeout_ms = 10000
         "completed-without-usage must not be classified as truncated:\n{metrics}"
     );
 }
+
+#[tokio::test]
+/// End-to-end pin for the `merge_fragmented` heal pass (spec
+/// `docs/superpowers/specs/2026-08-30-fragmented-items-merger-design.md`).
+/// The mock upstream emits 5 message fragments — each `output_text.delta`
+/// arrives as its own `output_item.added` event, the MiniMax M3 shape
+/// observed in NOTES-2026-08-28 §2. With the merger wired into the
+/// passthrough relay, the client must see exactly ONE
+/// `response.output_item.added` event (the first fragment passes
+/// through; the other four are suppressed) and one merged assistant
+/// message whose text concatenates all five `"chunk{i} "` deltas.
+///
+/// Without the merger, the client would see 5 `output_item.added`
+/// events and 5 disjoint message items in the Codex TUI (one bullet per
+/// chunk). The assertion is the binary test of merger-correctness
+/// through the real binary against a real upstream HTTP boundary.
+async fn passthrough_merges_fragmented_message_run() {
+    let env = setup_with_config(|mock_base_url, port| {
+        format!(
+            r#"
+[server]
+host = "127.0.0.1"
+port = {port}
+
+[providers.merger]
+base_url = "{mock_base_url}/fragmented"
+api_key = "test-key"
+format = "responses"
+timeout_ms = 5000
+
+[routes]
+"merger/M3" = {{ model = "upstream-M3" }}
+"#
+        )
+    })
+    .await;
+
+    let resp = env
+        .client
+        .post(format!("{}/v1/responses", env.router_url))
+        .json(&json!({
+            "model": "merger/M3",
+            "input": "hello",
+            "stream": true,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.text().await.unwrap();
+
+    // The merger collapses 5 upstream fragments into 1 client-visible
+    // item; the trailing 4 `output_item.added` events are suppressed.
+    // Match on the SSE `event:` line (not the JSON `data:` payload,
+    // which also contains the literal `"type":"response.output_item.added"`
+    // string) so each event counts once.
+    let added_count = body.matches("event: response.output_item.added").count();
+    assert_eq!(
+        added_count, 1,
+        "expected exactly 1 output_item.added (merged from 5 fragments), got {added_count}:\n{body}"
+    );
+
+    // The merged text must be the concatenation of all 5 deltas. The
+    // deltas carry a trailing space (`"chunk{i} "`), so the merged
+    // body text is exactly `"chunk0 chunk1 chunk2 chunk3 chunk4 "`
+    // — confirmed by checking each chunk individually (the
+    // implementation re-emits 5 separate deltas, all rewritten to the
+    // first fragment's item_id).
+    let events = parse_sse(&body);
+    let mut text_chunks: Vec<String> = Vec::new();
+    for evt in &events {
+        if evt.event == "response.output_text.delta" {
+            let v: Value = serde_json::from_str(&evt.data).unwrap();
+            if let Some(d) = v["delta"].as_str() {
+                text_chunks.push(d.to_string());
+            }
+        }
+    }
+    assert_eq!(
+        text_chunks.join(""),
+        "chunk0 chunk1 chunk2 chunk3 chunk4 ",
+        "merged deltas must concatenate the 5 fragments"
+    );
+
+    // Each rewritten delta must point at the FIRST fragment's
+    // item_id (`msg_0`) and output_index (0), not its own — that's
+    // the delta-rewrite rule from spec §Event rewriting rules.
+    for evt in events
+        .iter()
+        .filter(|e| e.event == "response.output_text.delta")
+    {
+        let v: Value = serde_json::from_str(&evt.data).unwrap();
+        assert_eq!(
+            v["item_id"].as_str(),
+            Some("msg_0"),
+            "item_id rewritten: {evt:?}"
+        );
+        assert_eq!(
+            v["output_index"].as_u64(),
+            Some(0),
+            "output_index rewritten: {evt:?}"
+        );
+    }
+
+    // The relay must still emit a `response.completed` event so the
+    // client's session replay and metrics classification see a
+    // successful turn (success is judged by the captured upstream id,
+    // AGENTS.md §11).
+    assert!(
+        events.iter().any(|e| e.event == "response.completed"),
+        "response.completed missing from relay:\n{body}"
+    );
+}
+
+#[tokio::test]
+/// End-to-end pin for the merger's type-switch boundary (spec §State
+/// machine). The mock upstream emits a mixed stream: 3 message
+/// fragments → 1 reasoning item (standalone) → 2 message fragments,
+/// all under the same response. With the merger wired in, the client
+/// must see 3 `output_item.added` events: the merged first message run
+/// (length 3 → 1), the reasoning item (length 1 → 1, untouched), and the
+/// merged second message run (length 2 → 1). The reasoning summary
+/// stays inside the reasoning item; the message runs concatenate text
+/// independently of each other.
+async fn passthrough_merges_interleaved_runs() {
+    let env = setup_with_config(|mock_base_url, port| {
+        format!(
+            r#"
+[server]
+host = "127.0.0.1"
+port = {port}
+
+[providers.merger]
+base_url = "{mock_base_url}/fragmented"
+api_key = "test-key"
+format = "responses"
+timeout_ms = 5000
+
+[routes]
+"merger/M3" = {{ model = "upstream-M3" }}
+"#
+        )
+    })
+    .await;
+
+    let resp = env
+        .client
+        .post(format!("{}/v1/responses", env.router_url))
+        .json(&json!({
+            "model": "merger/M3",
+            "input": "interleaved hello",
+            "stream": true,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.text().await.unwrap();
+
+    let events = parse_sse(&body);
+
+    // Exactly 3 client-visible items (3 merged/suppressed upstream
+    // runs → 3 distinct items: msg-run-1, reasoning, msg-run-2).
+    let added_count = body.matches("event: response.output_item.added").count();
+    assert_eq!(
+        added_count, 3,
+        "expected 3 output_item.added (msg+reasoning+msg), got {added_count}:\n{body}"
+    );
+
+    // Collect the per-item types so we can verify the reasoning item
+    // is its own item (not merged with the surrounding messages).
+    let mut added_items: Vec<Value> = Vec::new();
+    for evt in events
+        .iter()
+        .filter(|e| e.event == "response.output_item.added")
+    {
+        let v: Value = serde_json::from_str(&evt.data).unwrap();
+        if let Some(t) = v["item"]["type"].as_str() {
+            added_items.push(json!({ "type": t, "id": v["item"]["id"] }));
+        }
+    }
+    assert_eq!(added_items.len(), 3);
+    let types: Vec<&str> = added_items
+        .iter()
+        .map(|i| i["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        types,
+        vec!["message", "reasoning", "message"],
+        "expected msg → reasoning → msg ordering"
+    );
+
+    // The first message run concatenates its 3 deltas (text = "m0 m1 m2 ").
+    // The second message run concatenates its 2 deltas (text = "n4 n5 ").
+    // The reasoning item carries its own summary.
+    let mut msg_run1_text = String::new();
+    let mut msg_run2_text = String::new();
+    for evt in events
+        .iter()
+        .filter(|e| e.event == "response.output_text.delta")
+    {
+        let v: Value = serde_json::from_str(&evt.data).unwrap();
+        if let Some(d) = v["delta"].as_str() {
+            match v["item_id"].as_str() {
+                // After the merger rewrite, the first message run's
+                // deltas all carry msg_0; the second message run's
+                // deltas all carry msg_4 (its first fragment's id).
+                Some("msg_0") => msg_run1_text.push_str(d),
+                Some("msg_4") => msg_run2_text.push_str(d),
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(
+        msg_run1_text, "m0 m1 m2 ",
+        "first message run must concatenate its 3 deltas"
+    );
+    assert_eq!(
+        msg_run2_text, "n4 n5 ",
+        "second message run must concatenate its 2 deltas"
+    );
+
+    // The reasoning summary delta must reach the client unchanged
+    // (run length 1, no rewriting).
+    assert!(
+        events
+            .iter()
+            .any(|e| e.event == "response.reasoning_summary_text.delta"),
+        "reasoning summary delta must reach the client:\n{body}"
+    );
+}

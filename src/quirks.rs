@@ -12,9 +12,16 @@
 /// `config.rs` and for documentation. Keep in sync with the quirk lookups:
 /// the `glm_thinking` and `missing_done` gates live in `proxy`;
 /// `convert::request` receives the `glm_thinking` gate as a pre-read bool;
-/// the `dsml_heal` and `think_tags` gates are pre-read by `proxy` per
-/// request ([`crate::heal::HealGates`]) and consumed in `convert::response`.
-pub const QUIRK_NAMES: &[&str] = &["glm_thinking", "missing_done", "dsml_heal", "think_tags"];
+/// the `dsml_heal`, `think_tags`, and `merge_fragmented` gates are pre-read
+/// by `proxy` per request ([`crate::heal::HealGates`]) and consumed in
+/// `convert::response` / the passthrough healing path.
+pub const QUIRK_NAMES: &[&str] = &[
+    "glm_thinking",
+    "missing_done",
+    "dsml_heal",
+    "think_tags",
+    "merge_fragmented",
+];
 
 /// Whether a model name looks like a GLM/Zhipu reasoning model that needs
 /// the explicit `thinking` switch to emit `reasoning_content` (quirk

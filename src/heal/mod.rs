@@ -32,31 +32,46 @@ pub struct HealGates {
     /// Quirk `think_tags`: split leaked `<think>` markup onto the
     /// reasoning channel.
     pub think: bool,
+    /// Quirk `merge_fragmented`: collapse upstream Responses SSE runs of
+    /// same-type output items (e.g. MiniMax M3's per-chunk item
+    /// fragmentation, NOTES-2026-08-28 §2) into a single Responses-
+    /// conformant item. See
+    /// docs/superpowers/specs/2026-08-30-fragmented-items-merger-design.md.
+    pub merge_fragmented: bool,
 }
 
 impl Default for HealGates {
-    /// Both quirks default on: `[quirks] disabled = [...]` opts OUT, so the
+    /// All quirks default on: `[quirks] disabled = [...]` opts OUT, so the
     /// derived all-false default would silently disable healing everywhere.
     fn default() -> Self {
         HealGates {
             dsml: true,
             think: true,
+            merge_fragmented: true,
         }
     }
 }
 
 mod dsml;
+mod merge;
 mod responses;
 mod think;
 
 pub use dsml::{heal_dsml_chat_message, parse_leaked_tool_calls, DsmlStreamFilter, DsmlToolCall};
 pub use responses::{heal_responses_body, ResponsesStreamHealer};
+// FragmentedItemMerger is consumed by `passthrough.rs`'s streaming loop
+// (wired in Task 8). Until then the re-export would warn as unused;
+// suppress with a scoped attribute so Task 2's build stays clean.
+#[allow(unused_imports)]
+pub use merge::FragmentedItemMerger;
 pub use think::{contains_think_markup, heal_think_chat_message, ThinkSplit, ThinkStreamFilter};
 
 pub(crate) use dsml::synthesize_call_id;
 
 #[cfg(test)]
 mod dsml_tests;
+#[cfg(test)]
+mod merge_tests;
 #[cfg(test)]
 mod responses_healer_tests;
 #[cfg(test)]

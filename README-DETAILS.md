@@ -4,6 +4,43 @@ This is the deep reference: every config knob, every endpoint, the full
 dynamic/generated catalog runbooks, and the `doctor` failure-bisection
 table. The user-facing quick start is in [README.md](./README.md).
 
+## How it works
+
+```
+┌─── codexferry dynamic config ────────────────────────────────┐
+│                                                              │
+│ cxf.toml edit → hot-reload → next codex turn sees new routes │
+│                                                              │
+└──────────────────────────────────────────────────────────────┘
+
+                 ┌──── codex session ────┐
+                 │   one provider:       │
+                 │   `codexferry`        │
+                 └──────────┬────────────┘
+                            │
+                ┌───────────┴───────────┐
+                ▼                       ▼
+         ┌──────────────────┐   ┌──────────────────┐
+         │  responses       │   │       chat       │
+         │  upstream        │   │    upstream      │
+         │  passthrough     │   │    + heal        │
+         │  (verbatim)      │   │   Responses →    │
+         │                  │   │    Chat          │
+         └──────────────────┘   └──────────────────┘
+
+
+  switch mid-session (full history carried):
+    codex -m upstream-A-route
+    codex resume --last -m upstream-B-route
+```
+
+Codex sees a single provider whose `base_url` points at the daemon; the
+`provider/alias` prefix of each `-m` route key selects the upstream. The
+two branches: responses-format upstreams are relayed byte-for-byte
+verbatim (with opt-in event-granular healing when a quirk fires), while
+chat-format upstreams get the full Responses → Chat request conversion
+and Chat → Responses SSE conversion, plus the healing quirks below.
+
 ## Configuration Reference
 
 ### Full config example
@@ -108,9 +145,25 @@ drop_params  = ["reasoning_effort"]   # upstream rejects unknown fields
 extra_params = { top_k = 50 }         # fixed body additions
 ```
 
-Provider quirks — the GLM thinking switch, missing-`[DONE]` tolerance, and
-automatic healing of leaked DSML tool-call / `<think>` thinking markup on
-chat-route responses — are on by default and can be disabled per quirk:
+Provider quirks are on by default and can be disabled per quirk. The full
+list of registered quirks:
+
+- `glm_thinking` — adds `thinking: {"type":"enabled"}` for GLM/Zhipu models
+  (they suppress auto-thinking under heavy agent system prompts).
+- `missing_done` — treats a stream that ends without `[DONE]` but with a
+  `finish_reason` as complete, not failed.
+- `dsml_heal` — repairs leaked DeepSeek DSML tool-call markers in chat
+  replies (both streaming and one-shot paths restore leaked markers to
+  structured `tool_calls` and strip them from visible text).
+- `think_tags` — splits leaked `<think>…</think>` markers into the
+  reasoning channel instead of rendering them as body text.
+- `merge_fragmented` (responses-format path only) — collapses upstream
+  Responses SSE runs of same-type `output_item.added` events (observed on
+  MiniMax M3, 5–14 fragments per item) into a single Responses-conformant
+  item. All deltas are rewritten to the first fragment's `item_id` /
+  `output_index`; a synthesized `content_part.done` + `output_item.done`
+  closes the run. Self-deactivates on healthy streams (run length = 1).
+  Health-check passthrough is otherwise verbatim.
 
 ```toml
 [quirks]
@@ -201,7 +254,25 @@ refresh stores the updated catalog within seconds.
 Caveat: the `/model` picker list is a MERGE, not a replacement — non-ChatGPT
 auth cannot suppress codex's bundled models (`apply_remote_models` requires a
 ChatGPT account for replace semantics). For a pure route-only list, use
-static mode.
+static mode — or hide the bundled entries as described next.
+
+### Hiding Codex's bundled GPT models (dynamic mode)
+
+In dynamic mode Codex merges its own bundled model catalog (the GPT family
+compiled into the codex binary) underneath the models this proxy serves, so
+those entries show up in the picker. Setting
+
+```toml
+[server]
+hide_bundled_models = true
+```
+
+makes the live `/models` catalog additionally return `visibility: "hide"`
+copies of every picker-visible bundled model (discovered via `codex debug models
+--bundled`), which suppresses them from the picker while your routes stay
+selectable. If the `codex` binary is not on the proxy's `PATH`, hiding is
+silently disabled and the bundled models reappear — check the daemon log
+for the warning. `gen-catalog` output is never affected.
 
 ### Adding and removing routes (dynamic mode)
 

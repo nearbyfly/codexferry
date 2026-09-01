@@ -53,6 +53,9 @@ max_memory_mb = 512
 #                  one-shot paths restore leaked markers to structured tool_calls and strip them from visible text)
 #   think_tags   — splits leaked <think>…</think> markers into the reasoning channel instead of rendering
 #                  them as body text (also covers streaming and one-shot paths)
+#   merge_fragmented — responses-format path only: collapses upstream SSE runs of same-type
+#                  `output_item.added` events (e.g. MiniMax M3 per-chunk fragmentation) into
+#                  a single Responses-conformant item. See PR #7 spec for the state machine.
 [quirks]
 disabled = []
 

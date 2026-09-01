@@ -8,16 +8,16 @@
 //! hints (L1.3), the mode-keyed pin/shadow check — the replacement for the
 //! old single `shadow_check` (spec §Mode-specific shadow_check replacement
 //! + L2.7'': static-pin INFO / fallback-wiring WARN), the pin-shadow WARN
-//! (spec L2.7': fires whenever BOTH `model_catalog_json` and a provider
-//! `[X.auth].command` coexist, so a mixed pinned/dynamic config is caught
-//! no matter which mode `detect_mode` reports), the pinned-mode checks
-//! (spec L2.7–L2.10: pin exists + parses, pin ⊇ router routes, pin ⊆ router
-//! routes, pin entry field shape), the dynamic-mode endpoint checks (spec
-//! L2.8'–L2.9': `/v1/models` smoke + catalog shape), version age (L2.6) and
-//! version status vs the persisted doctor state. Every environment-
-//! dependent input is best-effort: no `~/.codex/config.toml` or no codex on
-//! PATH degrades to INFO/WARN. The one exception is L2.7: in pinned mode an
-//! unreadable pin FAILs, because codex cannot start until it is regenerated.
+//!   (spec L2.7': fires whenever BOTH `model_catalog_json` and a provider
+//!   `[X.auth].command` coexist, so a mixed pinned/dynamic config is caught
+//!   no matter which mode `detect_mode` reports), the pinned-mode checks
+//!   (spec L2.7–L2.10: pin exists + parses, pin ⊇ router routes, pin ⊆ router
+//!   routes, pin entry field shape), the dynamic-mode endpoint checks (spec
+//!   L2.8'–L2.9': `/v1/models` smoke + catalog shape), version age (L2.6) and
+//!   version status vs the persisted doctor state. Every environment-
+//!   dependent input is best-effort: no `~/.codex/config.toml` or no codex on
+//!   PATH degrades to INFO/WARN. The one exception is L2.7: in pinned mode an
+//!   unreadable pin FAILs, because codex cannot start until it is regenerated.
 //!
 //! The three run modes: `--offline` runs L1 + L2 only (fast path); the
 //! default composes L1 + L2 with the L3 live probe from
@@ -179,8 +179,8 @@ pub fn run_doctor(
 /// otherwise). Shared by all three doctor modes so the print-and-exit
 /// decision stays in one place.
 fn finish_report(checks: &[Check]) -> anyhow::Result<()> {
-    print_report(&checks);
-    if report_has_fail(&checks) {
+    print_report(checks);
+    if report_has_fail(checks) {
         std::process::exit(1);
     }
     Ok(())
@@ -1070,12 +1070,8 @@ const LAST_VERIFIED: &[&str] = &[];
 /// `None` when codex is absent or its `--version` output carries no digit
 /// token to normalize. Visibility only, never a FAIL.
 pub(crate) fn version_age(codex_version: Option<&str>) -> Option<Check> {
-    let Some(raw) = codex_version else {
-        return None;
-    };
-    let Some(cur) = crate::version::normalize_version(raw) else {
-        return None;
-    };
+    let raw = codex_version?;
+    let cur = crate::version::normalize_version(raw)?;
     if LAST_VERIFIED.is_empty() {
         return Some(Check::info(
             "codex version age",

@@ -961,6 +961,7 @@ fn dsml_markup_is_withheld_during_streaming() {
 fn disabled_heal_gates_pass_content_through_untouched() {
     let gates = HealGates {
         dsml: false,
+        merge_fragmented: false,
         think: false,
     };
     let mut conv =

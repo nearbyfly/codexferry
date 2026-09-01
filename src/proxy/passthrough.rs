@@ -45,6 +45,7 @@ pub(super) async fn handle_responses_format(
         crate::heal::HealGates {
             dsml: config.quirk_enabled("dsml_heal"),
             think: config.quirk_enabled("think_tags"),
+            merge_fragmented: config.quirk_enabled("merge_fragmented"),
         }
     };
     let url = responses_url(&route.provider.base_url);
@@ -169,9 +170,14 @@ pub(super) async fn handle_responses_format(
             // as a timeout and a terminal failure event is appended.
             let mut timed_out = false;
             let mut content_carry: Vec<u8> = Vec::new();
-            if !heal.dsml && !heal.think {
-                // Fast path: both healing gates off — verbatim byte relay
-                // (today's behavior, zero added parsing).
+            if !heal.dsml && !heal.think && !heal.merge_fragmented {
+                // Fast path: all three healing gates off — verbatim byte
+                // relay (zero added parsing). The merger must NOT be
+                // silently bypassed when content healers are off but
+                // `merge_fragmented` is on (its default); the gates are
+                // independent per the spec's D-1 orthogonality rule
+                // (merger handles item-shape; healers handle content).
+                // See review finding #1 on PR #7.
                 loop {
                     let timed = tokio::time::timeout(idle_timeout, stream.next()).await;
                     let chunk_result = match timed {
@@ -228,6 +234,16 @@ pub(super) async fn handle_responses_format(
                 // withheld tail released as a separate delta (the healer
                 // no-ops, so the relay is semantically verbatim but not
                 // byte-identical).
+                // Fragmented-items merger runs BEFORE the content healer:
+                // it normalizes the stream shape (collapsing same-type item
+                // runs into single Responses-conformant items), so the
+                // healer sees one canonical item per logical content unit.
+                // The two passes are orthogonal: the merger only touches
+                // item_id / output_index and done suppression; the healer
+                // does content-level DSML/think repair. See
+                // docs/superpowers/specs/2026-08-30-fragmented-items-merger-design.md
+                // §Design > Interaction with ResponsesStreamHealer.
+                let mut merger = crate::heal::FragmentedItemMerger::new(heal.merge_fragmented);
                 let mut healer = crate::heal::ResponsesStreamHealer::new(heal);
                 let mut events = Box::pin(crate::upstream::split_sse_events(stream));
                 'relay: loop {
@@ -257,18 +273,68 @@ pub(super) async fn handle_responses_format(
                             }
                         }
                     }
-                    for chunk in healer.push_event(&evt.raw, evt.event.as_deref(), &evt.data) {
-                        if tx.send(Ok(chunk.clone())).await.is_err() {
-                            client_disconnected = true;
-                            break 'relay; // client disconnected
+                    // Merger output is the canonical stream shape (per
+                    // spec §Design > Interaction with ResponsesStreamHealer):
+                    // upstream chunks flow merger -> healer -> client. The
+                    // merger output is intermediate — fed to the healer so
+                    // content-level DSML/think repair sees one canonical
+                    // item per logical unit (resolves review #5/#7
+                    // multi-item boundaries, NOTES §6.3). Only the
+                    // healer's output is sent to the client and into
+                    // `raw` (so session capture reflects what the client
+                    // actually saw). Sending both would duplicate every
+                    // event on length-1 runs; the S1-S3 composition
+                    // fixtures use this exact pattern.
+                    for chunk in merger.push_event(&evt.raw, evt.event.as_deref(), &evt.data) {
+                        // Re-derive (event, data) from the merger-rewritten
+                        // chunk so the content heater sees the MERGER's
+                        // payload, not the upstream's. Without this re-parse:
+                        //  - a rewritten delta would carry `item_id: msg_0`
+                        //    in the chunk but `item_id: msg_N` in the data
+                        //    the heater parses, so `message_item_id` tracks
+                        //    the unmerged upstream id and every later rewrite
+                        //    goes to the wrong item (review finding #1a);
+                        //  - synthesized `content_part.done` /
+                        //    `output_item.done` chunks would be dispatched
+                        //    as the upstream event (`evt.event`), bypassing
+                        //    the text-rewrite arms entirely (finding #1b);
+                        //  - the synthesized `content_part.done` would ship
+                        //    raw DSML/think markup because the heater never
+                        //    sees it as a `content_part.done` (finding #1c);
+                        //  - `response.completed` would re-run
+                        //    `rewrite_completed` 3× — once for each
+                        //    synthesized done and once for the raw completed
+                        //    (finding #1d, triplicated `response.completed`).
+                        // Fall back to the upstream (event, data) if the
+                        // chunk somehow doesn't parse — defensive, the
+                        // merger always emits a well-formed SSE block.
+                        let (m_event, m_data) = crate::upstream::parse_sse_block(&chunk);
+                        let heal_event: &str;
+                        let heal_data: &str;
+                        if let Some(name) = m_event.as_ref() {
+                            heal_event = name.as_str();
+                            heal_data = m_data.as_str();
+                        } else {
+                            heal_event = evt.event.as_deref().unwrap_or("");
+                            heal_data = evt.data.as_str();
                         }
-                        let prev_len = raw.len();
-                        raw.extend_from_slice(&chunk);
-                        if !raw_trimmed && trim_completed_prefix(&mut raw, prev_len) {
-                            raw_trimmed = true;
+                        for h_chunk in healer.push_event(&chunk, Some(heal_event), heal_data) {
+                            if tx.send(Ok(h_chunk.clone())).await.is_err() {
+                                client_disconnected = true;
+                                break 'relay; // client disconnected
+                            }
+                            let prev_len = raw.len();
+                            raw.extend_from_slice(&h_chunk);
+                            if !raw_trimmed && trim_completed_prefix(&mut raw, prev_len) {
+                                raw_trimmed = true;
+                            }
                         }
                     }
                 }
+                // Flush the healer at stream end (merger.finish() is a
+                // no-op by spec γ-1: never synthesize `output_item.done`
+                // at finish; passthrough's `response.failed` handles
+                // truncated turns).
                 for chunk in healer.finish() {
                     if tx.send(Ok(chunk.clone())).await.is_err() {
                         client_disconnected = true;

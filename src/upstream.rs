@@ -170,6 +170,35 @@ where
     )
 }
 
+/// Parse a raw SSE block and extract just the `(event, data)` pair.
+///
+/// Reuses the line-walk that powers [`parse_preserved_event`] for byte
+/// blocks produced by the merger (`Bytes::from("event: ...\ndata: ...
+/// \n\n")`); unlike the private helper, this one works on borrowed bytes
+/// and returns only the two fields the content-heater dispatcher needs.
+/// Used at the passthrough wiring site to feed the heater the
+/// **merger-rewritten** event name + data, not the upstream's — otherwise
+/// the heater would tag synthesized `content_part.done` /
+/// `output_item.done` events as upstream `output_item.added`, the
+/// `rewrite_completed` pass would run 3x per `response.completed`
+/// (synthesized content_part.done + synthesized output_item.done + raw
+/// completed), and the rewritten `item_id` would never reach the content
+/// filter (issue found in the final-review fix wave). Comment-only / blank
+/// blocks return `(None, "")` — same shape the healer's `else` arm expects.
+pub(crate) fn parse_sse_block(raw: &[u8]) -> (Option<String>, String) {
+    let text = String::from_utf8_lossy(raw);
+    let mut event: Option<String> = None;
+    let mut data_lines: Vec<&str> = Vec::new();
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("event:") {
+            event = Some(rest.strip_prefix(' ').unwrap_or(rest).to_string());
+        } else if let Some(rest) = line.strip_prefix("data:") {
+            data_lines.push(rest.strip_prefix(' ').unwrap_or(rest));
+        }
+    }
+    (event, data_lines.join("\n"))
+}
+
 /// Parse one raw SSE block into a [`PreservedSseEvent`].
 ///
 /// Every block — including comment-only and blank keepalive blocks (`event:

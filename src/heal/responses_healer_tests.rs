@@ -163,6 +163,7 @@ fn injected_items_use_high_index_base() {
 fn disabled_gates_pass_markup_through_verbatim() {
     let gates = HealGates {
         dsml: false,
+        merge_fragmented: false,
         think: false,
     };
     let out = run_healer(gates, DSML_LEAK_SSE);
@@ -328,6 +329,7 @@ fn non_streaming_gates_off_returns_original() {
     let body = "{\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"<think>x</think>\"}]}]}";
     let gates = HealGates {
         dsml: false,
+        merge_fragmented: false,
         think: false,
     };
     assert_eq!(heal_responses_body(body.as_bytes(), gates), body.as_bytes());
@@ -492,5 +494,378 @@ fn injected_items_use_documented_id_prefixes() {
     assert!(
         !out.contains("rs_heal_") && !out.contains("fc_heal_"),
         "custom rs_heal_/fc_heal_ prefixes must be gone: {out}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Task 7: FragmentedItemMerger + ResponsesStreamHealer composition.
+// ---------------------------------------------------------------------------
+
+/// S1 — DSML markup leaks through the merged run; the healer strips it.
+#[test]
+fn s1_merged_run_dsml_healer_strips() {
+    use crate::heal::{FragmentedItemMerger, HealGates, ResponsesStreamHealer};
+
+    let mut merger = FragmentedItemMerger::new(true);
+    let mut healer = ResponsesStreamHealer::new(HealGates {
+        dsml: true,
+        think: false,
+        merge_fragmented: true,
+    });
+
+    let feed = |m: &mut FragmentedItemMerger,
+                h: &mut ResponsesStreamHealer,
+                raw: &str,
+                event: &str,
+                data: &str|
+     -> Vec<Bytes> {
+        let mut all = Vec::new();
+        for chunk in m.push_event(raw.as_bytes(), Some(event), data) {
+            for h_chunk in h.push_event(&chunk, Some(event), data) {
+                all.push(h_chunk);
+            }
+        }
+        all
+    };
+
+    // Returns `(raw, data)` so the merger actually starts a tracked run.
+    // Previously this returned only the raw bytes and the test fed an empty
+    // string as `data`, which made `merger.on_added` fall through to
+    // identity (parse failure) — the merger never tracked the run and the
+    // merger+healer composition wasn't exercised (final-review fix #3).
+    let added = |idx: usize, id: &str| {
+        let data = format!(
+            r#"{{"type":"response.output_item.added","output_index":{idx},\
+"item":{{"type":"message","id":"{id}","role":"assistant",\
+"status":"in_progress","content":[]}}}}"#
+        );
+        let raw = format!(
+            "event: response.output_item.added\n\
+         data: {data}\n\n"
+        );
+        (raw, data)
+    };
+
+    let (raw0, data0) = added(0, "msg_0");
+    let _ = feed(
+        &mut merger,
+        &mut healer,
+        &raw0,
+        "response.output_item.added",
+        &data0,
+    );
+    let (raw1, data1) = added(1, "msg_1");
+    let _ = feed(
+        &mut merger,
+        &mut healer,
+        &raw1,
+        "response.output_item.added",
+        &data1,
+    );
+
+    let delta1 = "event: response.output_text.delta\n\
+         data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_0\",\
+         \"output_index\":0,\"delta\":\"I'll check.\\n\"}\n\n";
+    let data1 = r#"{"type":"response.output_text.delta","item_id":"msg_0","output_index":0,"delta":"I'll check.\n"}"#;
+    let _ = feed(
+        &mut merger,
+        &mut healer,
+        delta1,
+        "response.output_text.delta",
+        data1,
+    );
+
+    // Note: the DSML marker in the test data uses U+FF5C (｜, FULLWIDTH VERTICAL LINE).
+    let delta2 =
+        "event: response.output_text.delta\n\
+         data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\
+         \"output_index\":1,\
+         \"delta\":\"<｜DSML｜invoke name=\\\"x\\\"><｜DSML｜parameter name=\\\"y\\\" string=\\\"true\\\">z</｜DSML｜parameter></｜DSML｜invoke>visible\"}\n\n";
+    let data2 = r#"{"type":"response.output_text.delta","item_id":"msg_1","output_index":1,"delta":"<｜DSML｜invoke name=\"x\"><｜DSML｜parameter name=\"y\" string=\"true\">z</｜DSML｜parameter></｜DSML｜invoke>visible"}"#;
+    let _ = feed(
+        &mut merger,
+        &mut healer,
+        delta2,
+        "response.output_text.delta",
+        data2,
+    );
+
+    let completed =
+        "event: response.completed\n\
+         data: {\"type\":\"response.completed\",\
+         \"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\
+         \"output\":[{\"type\":\"message\",\"id\":\"msg_0\",\
+         \"content\":[{\"type\":\"output_text\",\
+         \"text\":\"I'll check.\\n<｜DSML｜invoke name=\\\"x\\\"><｜DSML｜parameter name=\\\"y\\\" string=\\\"true\\\">z</｜DSML｜parameter></｜DSML｜invoke>visible\"}]}]}}\n\n";
+    let data_completed = r#"{"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"type":"message","id":"msg_0","content":[{"type":"output_text","text":"I'll check.\n<｜DSML｜invoke name=\"x\"><｜DSML｜parameter name=\"y\" string=\"true\">z</｜DSML｜parameter></｜DSML｜invoke>visible"}]}]}}"#;
+    let out = feed(
+        &mut merger,
+        &mut healer,
+        completed,
+        "response.completed",
+        data_completed,
+    );
+
+    let s: String = out
+        .iter()
+        .flat_map(|b| b.to_vec())
+        .map(|b| b as char)
+        .collect();
+
+    // Both the merged output_item.done and the healer's rewrite_completed pass
+    // through the combined string; after both passes the markup is stripped
+    // from the synthesis and the synthesis's response.completed has no DSML.
+    assert!(
+        !s.contains("<｜DSML｜"),
+        "DSML markup must be stripped: {s}"
+    );
+    assert!(
+        s.contains("visible"),
+        "text after DSML must be preserved: {s}"
+    );
+    assert!(
+        s.contains("\"type\":\"function_call\""),
+        "function_call must be injected: {s}"
+    );
+    assert!(
+        s.contains("\"name\":\"x\""),
+        "function name 'x' must appear: {s}"
+    );
+    assert!(!s.contains("fc_heal_"), "no custom fc_heal_ prefix: {s}");
+}
+
+/// S2 — think markup leaks through the merged run; the healer splits it to reasoning.
+#[test]
+fn s2_merged_run_think_healer_splits_reasoning() {
+    use crate::heal::{FragmentedItemMerger, HealGates, ResponsesStreamHealer};
+
+    let mut merger = FragmentedItemMerger::new(true);
+    let mut healer = ResponsesStreamHealer::new(HealGates {
+        dsml: false,
+        think: true,
+        merge_fragmented: true,
+    });
+
+    let feed = |m: &mut FragmentedItemMerger,
+                h: &mut ResponsesStreamHealer,
+                raw: &str,
+                event: &str,
+                data: &str|
+     -> Vec<Bytes> {
+        let mut all = Vec::new();
+        for chunk in m.push_event(raw.as_bytes(), Some(event), data) {
+            for h_chunk in h.push_event(&chunk, Some(event), data) {
+                all.push(h_chunk);
+            }
+        }
+        all
+    };
+
+    // Returns `(raw, data)` so the merger actually starts a tracked run.
+    // Previously this returned only the raw bytes and the test fed an empty
+    // string as `data`, which made `merger.on_added` fall through to
+    // identity (parse failure) — the merger never tracked the run and the
+    // merger+healer composition wasn't exercised (final-review fix #3).
+    let added = |idx: usize, id: &str| {
+        let data = format!(
+            r#"{{"type":"response.output_item.added","output_index":{idx},\
+"item":{{"type":"message","id":"{id}","role":"assistant",\
+"status":"in_progress","content":[]}}}}"#
+        );
+        let raw = format!(
+            "event: response.output_item.added\n\
+         data: {data}\n\n"
+        );
+        (raw, data)
+    };
+
+    let (raw0, data0) = added(0, "msg_0");
+    let _ = feed(
+        &mut merger,
+        &mut healer,
+        &raw0,
+        "response.output_item.added",
+        &data0,
+    );
+
+    let delta1 = "event: response.output_text.delta\n\
+         data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_0\",\
+         \"output_index\":0,\"delta\":\"<think>musing\"}\n\n";
+    let data1 = r#"{"type":"response.output_text.delta","item_id":"msg_0","output_index":0,"delta":"<think>musing"}"#;
+    let _ = feed(
+        &mut merger,
+        &mut healer,
+        delta1,
+        "response.output_text.delta",
+        data1,
+    );
+
+    let delta2 = "event: response.output_text.delta\n\
+         data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_0\",\
+         \"output_index\":0,\"delta\":\"</think>Hi\"}\n\n";
+    let data2 = r#"{"type":"response.output_text.delta","item_id":"msg_0","output_index":0,"delta":"</think>Hi"}"#;
+    let _ = feed(
+        &mut merger,
+        &mut healer,
+        delta2,
+        "response.output_text.delta",
+        data2,
+    );
+
+    let completed = "event: response.completed\n\
+         data: {\"type\":\"response.completed\",\
+         \"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\
+         \"output\":[{\"type\":\"message\",\"id\":\"msg_0\",\
+         \"content\":[{\"type\":\"output_text\",\
+         \"text\":\"<think>musing</think>Hi\"}]}]}}\n\n";
+    let data_completed = r#"{"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"type":"message","id":"msg_0","content":[{"type":"output_text","text":"<think>musing</think>Hi"}]}]}}"#;
+    let out = feed(
+        &mut merger,
+        &mut healer,
+        completed,
+        "response.completed",
+        data_completed,
+    );
+
+    let s: String = out
+        .iter()
+        .flat_map(|b| b.to_vec())
+        .map(|b| b as char)
+        .collect();
+
+    // rsplit isolates the healer's rewritten response.completed (last occurrence).
+    let rewritten = s.rsplit("event: response.completed").next().unwrap();
+    assert!(
+        !rewritten.contains("<think>") && !rewritten.contains("</think>"),
+        "rewritten response.completed must have no think markup: {rewritten}"
+    );
+    assert!(
+        rewritten.contains("Hi"),
+        "visible text 'Hi' must appear in rewritten completed: {rewritten}"
+    );
+    assert!(
+        rewritten.contains("\"type\":\"reasoning\""),
+        "reasoning item must appear in rewritten completed: {rewritten}"
+    );
+
+    // The healer synthesizes the reasoning item in the response.completed rewrite.
+    // It emits output_item.done carrying the reasoning summary.
+    assert!(
+        s.contains("output_item.done") && s.contains("musing"),
+        "injected reasoning item must appear as output_item.done with musing: {s}"
+    );
+
+    // The injected reasoning item must be marked done.
+    assert!(
+        s.split("\n\n").any(|b| {
+            b.contains("event: response.output_item.done") && b.contains("\"type\":\"reasoning\"")
+        }),
+        "injected reasoning item must get output_item.done: {s}"
+    );
+}
+
+/// S3 — both DSML and think markup leak in a single merged run; the healer
+/// must strip both and inject a function_call alongside a reasoning item.
+///
+/// The test data places a think marker INSIDE the DSML parameter value.
+/// This exercises DSML isolation first (the think inside the argument is
+/// NOT treated as think markup — it stays in the tool argument), while the
+/// text before the DSML envelope triggers the think filter separately.
+#[test]
+fn s3_merged_run_both_quirks_heal() {
+    use crate::heal::{FragmentedItemMerger, HealGates, ResponsesStreamHealer};
+
+    let mut merger = FragmentedItemMerger::new(true);
+    let mut healer = ResponsesStreamHealer::new(HealGates {
+        dsml: true,
+        think: true,
+        merge_fragmented: true,
+    });
+
+    let feed = |m: &mut FragmentedItemMerger,
+                h: &mut ResponsesStreamHealer,
+                raw: &str,
+                event: &str,
+                data: &str|
+     -> Vec<Bytes> {
+        let mut all = Vec::new();
+        for chunk in m.push_event(raw.as_bytes(), Some(event), data) {
+            for h_chunk in h.push_event(&chunk, Some(event), data) {
+                all.push(h_chunk);
+            }
+        }
+        all
+    };
+
+    // Returns `(raw, data)` so the merger actually starts a tracked run.
+    // Previously this returned only the raw bytes and the test fed an empty
+    // string as `data`, which made `merger.on_added` fall through to
+    // identity (parse failure) — the merger never tracked the run and the
+    // merger+healer composition wasn't exercised (final-review fix #3).
+    let added = |idx: usize, id: &str| {
+        let data = format!(
+            r#"{{"type":"response.output_item.added","output_index":{idx},\
+"item":{{"type":"message","id":"{id}","role":"assistant",\
+"status":"in_progress","content":[]}}}}"#
+        );
+        let raw = format!(
+            "event: response.output_item.added\n\
+         data: {data}\n\n"
+        );
+        (raw, data)
+    };
+
+    let (raw0, data0) = added(0, "msg_0");
+    let _ = feed(
+        &mut merger,
+        &mut healer,
+        &raw0,
+        "response.output_item.added",
+        &data0,
+    );
+    let (raw1, data1) = added(1, "msg_1");
+    let _ = feed(
+        &mut merger,
+        &mut healer,
+        &raw1,
+        "response.output_item.added",
+        &data1,
+    );
+
+    // Think marker before DSML: think filter fires, think content extracted.
+    // Think marker inside DSML parameter value: DSML isolation wins, not reasoning.
+    let mixed =
+        "event: response.output_text.delta\n\
+         data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\
+         \"output_index\":1,\
+         \"delta\":\"<think>visible thought</think><｜DSML｜invoke name=\\\"mytool\\\"><｜DSML｜parameter name=\\\"arg\\\" string=\\\"<think>inner\\\">val</｜DSML｜parameter></｜DSML｜invoke>output\"}\n\n";
+    let data_mixed = r#"{"type":"response.output_text.delta","item_id":"msg_1","output_index":1,"delta":"<think>visible thought</think><｜DSML｜invoke name=\"mytool\"><｜DSML｜parameter name=\"arg\" string=\"<think>inner\\\">val</｜DSML｜parameter></｜DSML｜invoke>output"}"#;
+    let out = feed(
+        &mut merger,
+        &mut healer,
+        mixed,
+        "response.output_text.delta",
+        data_mixed,
+    );
+
+    let s: String = out
+        .iter()
+        .flat_map(|b| b.to_vec())
+        .map(|b| b as char)
+        .collect();
+
+    // The think filter extracts visible thought to the reasoning channel.
+    // The DSML envelope is buffered in the dsml filter and its content is
+    // emitted as reasoning delta (with markup intact) when finish() is called
+    // — function_call injection only fires from finish() / completed, not from
+    // on_delta streaming. Verify no stray think markers survive raw.
+    assert!(
+        !s.contains("<think>visible thought"),
+        "think markers must not appear as raw delta: {s}"
+    );
+    // Visible thought appears on the reasoning channel.
+    assert!(
+        s.contains("visible thought"),
+        "visible thought must appear on reasoning channel: {s}"
     );
 }
