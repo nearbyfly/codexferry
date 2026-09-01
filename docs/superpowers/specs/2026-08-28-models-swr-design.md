@@ -147,3 +147,12 @@ of scope.
   nothing.
 - Refresh-observability metrics (duration counters): nothing consumes them
   today.
+
+
+> **Amended 2026-09-01** (reload-staleness): the one-request-stale tolerance
+> above now applies ONLY to time-based staleness (60s recheck, template
+> mtime). Requests arriving after a CONFIG change wait for the refreshed
+> catalog instead — codex persists `/v1/models` responses into its own 300s
+> cache, so a persisted pre-change body kept a removed route selectable for
+> ~5 minutes. The hot-reload applier also refreshes the cache proactively.
+> See `2026-09-01-models-cache-reload-staleness-design.md`.

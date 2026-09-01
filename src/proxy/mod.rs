@@ -348,7 +348,23 @@ pub async fn serve(
     // hot-reloads it in place via a channel + async applier (updates are
     // queued while the lock is busy, never dropped - AGENTS.md #7).
     let shared: SharedConfig = Arc::new(RwLock::new(validated.clone()));
-    let _watcher = spawn_watcher(config_path, shared.clone())?;
+
+    // The /models catalog cache is created BEFORE the watcher so the reload
+    // hook can reach it: after each applied config change the applier
+    // proactively refreshes the catalog (reload-staleness spec §Design A),
+    // so the racing fetches that follow land on an already-fresh entry
+    // instead of the pre-change body.
+    let models = Arc::new(crate::models_cache::CatalogCache::new());
+    let hook_models = Arc::clone(&models);
+    let hook_config = Arc::clone(&shared);
+    let on_reload: crate::config::ReloadHook = Arc::new(move || {
+        let models = Arc::clone(&hook_models);
+        let shared = Arc::clone(&hook_config);
+        tokio::spawn(async move {
+            models.refresh_if_stale(&shared).await;
+        });
+    });
+    let _watcher = spawn_watcher(config_path, shared.clone(), Some(on_reload))?;
 
     // Pooled HTTP client shared by all handlers. A 90s idle timeout avoids
     // errors from upstreams closing idle keep-alive connections.
@@ -382,7 +398,7 @@ pub async fn serve(
         config: shared,
         sessions,
         client,
-        models: Arc::new(crate::models_cache::CatalogCache::new()),
+        models,
         metrics: crate::metrics::Metrics::new(),
         version_tracker: Arc::new(crate::version::CodexVersionTracker::new()),
         doctor_state_path: crate::version::state_path(),

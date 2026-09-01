@@ -247,9 +247,12 @@ models` lists the router routes alongside the bundled gpt models, and real
 On every successful hot-reload the daemon deletes that cache file, so codex's
 next catalog read re-fetches `/v1/models` instead of waiting out the 300s TTL.
 A background worker inside codex also re-fetches every 3 minutes on its own.
-Catalog serving is stale-while-revalidate: the first `/v1/models` read after a
-config edit may still return the pre-change body; a single-flight background
-refresh stores the updated catalog within seconds.
+Catalog serving distinguishes config changes from time-based staleness: reads
+arriving after a config edit WAIT for the refreshed catalog (the hot-reload
+applier also refreshes proactively), so a removed route disappears from the
+catalog immediately — important because codex persists the response into its
+own 300s cache. Only the 60s time-based recheck serves stale-while-revalidate
+(old body served while a background refresh runs).
 
 Caveat: the `/model` picker list is a MERGE, not a replacement — non-ChatGPT
 auth cannot suppress codex's bundled models (`apply_remote_models` requires a
@@ -374,8 +377,9 @@ not what you want day to day.
 
 Clients that send `client_version` get the Codex `ModelsResponse` catalog,
 built from the current config with ETag revalidation — no restart needed
-after a config edit (stale-while-revalidate: the first read after an edit may
-return the pre-change body until the background refresh completes). Clients that do **not** send `client_version` (e.g.
+after a config edit (reads after an edit wait for the refreshed catalog, so
+they always reflect it; only the 60s time-based recheck serves a stale body
+while a background refresh runs). Clients that do **not** send `client_version` (e.g.
 plain OpenAI-compatible list clients) get the Chat-Completions list shape
 (`{"object":"list","data":[...]}`) at the same URL. Both shapes are supported
 and tested; a codex wired with command auth (dynamic mode above) hits the

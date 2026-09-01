@@ -46,6 +46,14 @@ release is cut, so both remotes receive it through the normal push flow.
 
 ### Fixed
 
+- **Removed routes stayed listed in codex's picker for ~5 minutes**: a
+  `/v1/models` fetch racing a hot reload received the pre-change catalog and
+  codex persisted it into its own 300s cache. Reads arriving after a config
+  change now wait for the refreshed catalog (and the hot-reload applier
+  refreshes it proactively), so route add/remove/change is reflected in every
+  post-edit response; the stale-while-revalidate trade remains only for the
+  60s time-based recheck.
+
 - **Long codex sessions rejected with 413**: the daemon now accepts request
   bodies up to 64 MiB (axum's 2 MiB default rejected long `store: false`
   transcript replays). The same cap bounds non-streaming upstream response

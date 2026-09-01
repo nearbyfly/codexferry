@@ -797,8 +797,19 @@ use tokio::sync::RwLock;
 /// while a reload is happening.
 pub type SharedConfig = Arc<RwLock<ValidatedConfig>>;
 
+/// Callback fired by the hot-reload applier after each applied config
+/// change (reload-staleness spec §Design A). The server installs a hook
+/// that proactively refreshes the `/models` catalog cache, so a config edit
+/// is reflected without waiting for a request to trigger the rebuild.
+/// Fire-and-forget by contract: implementations must not block the applier
+/// loop (spawn whatever work they need).
+pub type ReloadHook = Arc<dyn Fn() + Send + Sync>;
+
 /// Spawn a file watcher that hot-reloads config on change.
 /// On parse error, keeps old config and logs error.
+///
+/// `on_reload` (optional) is invoked by the applier after each applied
+/// change — see [`ReloadHook`].
 ///
 /// Uses the `notify` crate to watch the config file for `Modify`/`Create`
 /// events. On each event the file is re-read, re-validated, and sent over
@@ -835,7 +846,11 @@ fn event_touches_config(paths: &[std::path::PathBuf], file_name: &std::ffi::OsSt
     paths.iter().any(|p| p.file_name() == Some(file_name))
 }
 
-pub fn spawn_watcher(path: &Path, shared: SharedConfig) -> anyhow::Result<impl Watcher> {
+pub fn spawn_watcher(
+    path: &Path,
+    shared: SharedConfig,
+    on_reload: Option<ReloadHook>,
+) -> anyhow::Result<impl Watcher> {
     // Resolve symlinks ONCE and watch the REAL file's parent directory
     // with a filename filter (hot-reload-watcher spec §Design). An
     // inode-level file watch dies permanently on the first atomic-rename
@@ -867,7 +882,7 @@ pub fn spawn_watcher(path: &Path, shared: SharedConfig) -> anyhow::Result<impl W
     // callback only sends (never blocks, never loses an update), and the
     // applier task awaits the write lock on the tokio runtime.
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ValidatedConfig>();
-    let _applier = tokio::spawn(spawn_config_applier(shared, rx));
+    let _applier = tokio::spawn(spawn_config_applier(shared, rx, on_reload));
 
     let mut watcher = notify::recommended_watcher(move |res: Result<notify::Event, _>| {
         if let Ok(event) = res {
@@ -918,14 +933,23 @@ pub fn spawn_watcher(path: &Path, shared: SharedConfig) -> anyhow::Result<impl W
 /// write lock. Unlike the previous `try_write` design, an update sent while
 /// the lock is busy is queued, not dropped - it is applied as soon as
 /// in-flight requests release their read guards.
+///
+/// After each applied change the [`ReloadHook`] fires (when installed): the
+/// server hooks the catalog cache's proactive refresh into it so a config
+/// edit is reflected in `/v1/models` without waiting for a request to
+/// trigger the rebuild (reload-staleness spec §Design A).
 async fn spawn_config_applier(
     shared: SharedConfig,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<ValidatedConfig>,
+    on_reload: Option<ReloadHook>,
 ) {
     while let Some(new_cfg) = rx.recv().await {
         *shared.write().await = new_cfg;
         tracing::info!("config reloaded successfully");
         invalidate_codex_catalog_cache().await;
+        if let Some(hook) = &on_reload {
+            hook();
+        }
     }
 }
 
@@ -1174,7 +1198,7 @@ format = "chat"
 "#;
         std::fs::write(&path, config_a).unwrap();
         let shared: SharedConfig = Arc::new(RwLock::new(make_config(config_a)));
-        let _watcher = spawn_watcher(&path, shared.clone()).unwrap();
+        let _watcher = spawn_watcher(&path, shared.clone(), None).unwrap();
 
         // Simulate an in-flight request: hold the read lock so the notify
         // callback's try_write (or the applier's write) cannot proceed.

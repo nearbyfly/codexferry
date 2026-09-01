@@ -92,10 +92,14 @@ impl CatalogCache {
 
     /// Return `(etag, body)` without holding a config guard across a
     /// subprocess call and without blocking the request on one except at
-    /// cold start (spec §Goal).
+    /// cold start and config changes (reload-staleness spec §Design).
     /// - fast path: fresh cache hit;
-    /// - stale path: return the old entry, spawn a single-flight background
-    ///   refresh;
+    /// - config changed (stored fingerprint ≠ current): WAIT for a refresh
+    ///   that reflects the new config — a fetch in this window must never
+    ///   return the pre-change body, because codex PERSISTS the response
+    ///   and would keep listing removed routes for its own 300s cache TTL;
+    /// - stale path (fingerprint MATCHES, time-based staleness only): SWR —
+    ///   return the old entry, spawn a single-flight background refresh;
     /// - cold start (no entry): an entry MUST exist when we leave. Win or
     ///   wait for the single-flight lock, then refresh, retrying with a
     ///   FORCED store when the fingerprint guard discards repeated
@@ -107,41 +111,111 @@ impl CatalogCache {
         if let Some(hit) = self.fast_hit(fingerprint) {
             return hit;
         }
-        if self.inner.lock().unwrap().is_some() {
-            // Stale-while-revalidate. The single-flight try_lock lives
-            // INSIDE the spawned task (an Arc owns everything, so the task
-            // is 'static); losers exit immediately.
-            let cache = Arc::clone(self);
-            let config = Arc::clone(config);
-            tokio::spawn(async move {
-                if let Ok(_guard) = cache.refreshing.try_lock() {
-                    cache.refresh(&config, false).await;
-                }
-            });
-            self.stale_hit()
-                .expect("stale path checked inner.is_some(); nothing ever clears it")
-        } else {
-            // Cold start (no entry): there is no stale body to serve, so the
-            // request must end with a fresh entry. Win the single-flight
-            // lock or wait for the current holder, then refresh. A refresh
-            // is DISCARDED when a config write lands mid-refresh (fingerprint
-            // guard); retry, and force the store on every retry after the
-            // first so the loop always terminates (PR #6 review issue 2).
-            let _guard = match self.refreshing.try_lock() {
-                Ok(guard) => guard,
-                Err(_) => self.refreshing.lock().await,
-            };
-            if let Some(hit) = self.stale_hit() {
-                return hit;
-            }
-            let mut force = false;
-            loop {
-                self.refresh(config, force).await;
+        let entry_is_current = self
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|c| c.fingerprint == fingerprint);
+        match entry_is_current {
+            None => {
+                // Cold start (no entry): there is no stale body to serve, so
+                // the request must end with a fresh entry. Win the
+                // single-flight lock or wait for the current holder, then
+                // refresh. A refresh is DISCARDED when a config write lands
+                // mid-refresh (fingerprint guard); retry, and force the
+                // store on every retry after the first so the loop always
+                // terminates (PR #6 review issue 2).
+                let _guard = self.single_flight().await;
                 if let Some(hit) = self.stale_hit() {
                     return hit;
                 }
-                force = true;
+                let mut force = false;
+                loop {
+                    self.refresh(config, force).await;
+                    if let Some(hit) = self.stale_hit() {
+                        return hit;
+                    }
+                    force = true;
+                }
             }
+            Some(true) => {
+                // Fingerprint matches: the staleness is time-based only
+                // (60s recheck / template mtime). SWR as designed — the old
+                // body is the trade the SWR spec chose; a refresh runs in
+                // the background. The single-flight try_lock lives INSIDE
+                // the spawned task (an Arc owns everything, so the task is
+                // 'static); losers exit immediately.
+                let cache = Arc::clone(self);
+                let config = Arc::clone(config);
+                tokio::spawn(async move {
+                    if let Ok(_guard) = cache.refreshing.try_lock() {
+                        cache.refresh(&config, false).await;
+                    }
+                });
+                self.stale_hit()
+                    .expect("stale path checked inner.is_some(); nothing ever clears it")
+            }
+            Some(false) => {
+                // Config changed since the entry was built: WAIT for a
+                // refresh reflecting the new config instead of serving a
+                // body the client will persist (reload-staleness spec
+                // §Design B). Fall back to the stored body only as the last
+                // resort (config changed AGAIN mid-refresh); the next
+                // request re-detects and retries.
+                self.refresh_if_stale(config).await;
+                self.fast_hit(fingerprint).unwrap_or_else(|| {
+                    self.stale_hit()
+                        .expect("entry existed above; refresh never clears it")
+                })
+            }
+        }
+    }
+
+    /// The single-flight guard: win `refreshing` or wait for the current
+    /// holder. Shared by the cold path and [`Self::refresh_if_stale`].
+    async fn single_flight(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        match self.refreshing.try_lock() {
+            Ok(guard) => guard,
+            Err(_) => self.refreshing.lock().await,
+        }
+    }
+
+    /// Make the cached entry reflect `config`'s CURRENT fingerprint,
+    /// refreshing synchronously when it does not.
+    ///
+    /// Used in two roles (reload-staleness spec §Design):
+    /// - **A (proactive)**: the hot-reload applier spawns this right after
+    ///   applying a config change, so the racing fetches that follow land
+    ///   on an already-fresh entry instead of the pre-change body;
+    /// - **B (wait)**: `get` calls it when a request arrives while the
+    ///   entry is stale-by-config.
+    ///
+    /// Concurrent callers serialize on `refreshing`; each re-checks
+    /// `fast_hit` after acquiring the lock, so a burst costs one refresh.
+    pub(crate) async fn refresh_if_stale(self: &Arc<Self>, config: &crate::config::SharedConfig) {
+        let fingerprint = fingerprint_config(&*config.read().await);
+        if self.fast_hit(fingerprint).is_some() {
+            return;
+        }
+        let _guard = self.single_flight().await;
+        if self.fast_hit(fingerprint).is_some() {
+            return;
+        }
+        let mut force = false;
+        loop {
+            self.refresh(config, force).await;
+            if self.fast_hit(fingerprint).is_some() {
+                return;
+            }
+            // A discarded refresh (config changed again mid-refresh) stores
+            // nothing; force one store so the loop terminates. The stored
+            // body may already be stale against an even newer config — the
+            // next request's fingerprint check re-detects that.
+            if force {
+                return;
+            }
+            force = true;
         }
     }
 
@@ -565,8 +639,138 @@ context_window = 1000
         );
     }
 
+    /// Reload-staleness spec §Design A: `refresh_if_stale` alone (no
+    /// request involved — the role the applier's ReloadHook plays) must
+    /// bring the entry to the new config's fingerprint.
     #[tokio::test]
-    async fn stale_entry_returns_immediately_and_refreshes_in_background() {
+    async fn refresh_if_stale_syncs_without_a_request() {
+        let cfg = Arc::new(RwLock::new(config_with_flag("ds/a", true)));
+        let cache = Arc::new(CatalogCache {
+            inner: Mutex::new(None),
+            refreshing: Default::default(),
+            discovery: marker_discovery,
+        });
+        let _ = cache.get(&cfg).await; // ds/a entry
+        *cfg.write().await = config_with_flag("ds/b", true);
+        cache.refresh_if_stale(&cfg).await;
+        let fp_b = fingerprint_config(&*cfg.read().await);
+        let (etag, body) = cache.get(&cfg).await;
+        assert!(
+            body.windows(4).any(|w| w == b"ds/b"),
+            "refresh_if_stale must have synced the entry to ds/b"
+        );
+        // The get after the sync is a pure fast hit: same etag the synced
+        // entry produced, no re-discovery observable through the body.
+        let _ = etag;
+    }
+
+    /// Scenario matrix (spec S1–S5): the fingerprint changes exactly for
+    /// the edits whose outcome is catalog-visible, and — critically — NOT
+    /// for an upstream `model=`-only change or a routeless provider, whose
+    /// bodies are identical (model=/providers never enter the body).
+    #[test]
+    fn fingerprint_visibility_matrix() {
+        let toml_with = |route_line: &str| {
+            format!(
+                r#"
+[server]
+hide_bundled_models = false
+[providers.ds]
+base_url = "http://x"
+api_key = "k"
+format = "chat"
+[routes."ds/a"]
+{route_line}
+"#
+            )
+        };
+        let base = fingerprint_config(&parse_config_toml(&toml_with(
+            "model = \"m\"\ncontext_window = 1000",
+        )));
+        // S1/S5: a new route key (added provider+model or plain route) is visible.
+        let added = fingerprint_config(&parse_config_toml(&format!(
+            "{}\n[routes.\"ds/b\"]\nmodel = \"m\"\ncontext_window = 1000",
+            toml_with("model = \"m\"\ncontext_window = 1000")
+        )));
+        assert_ne!(
+            base, added,
+            "S1/S5: added route must change the fingerprint"
+        );
+        // S2a: upstream model=-only change — catalog-invisible by design.
+        let model_changed = fingerprint_config(&parse_config_toml(&toml_with(
+            "model = \"other-upstream\"\ncontext_window = 1000",
+        )));
+        assert_eq!(
+            base, model_changed,
+            "S2a: upstream model= is not catalog-visible; no invalidation"
+        );
+        // S2b: description / effort / context_window edits are visible.
+        for line in [
+            "model = \"m\"\ncontext_window = 1000\ndescription = \"fast\"",
+            "model = \"m\"\ncontext_window = 1000\ndefault_reasoning_effort = \"high\"",
+            "model = \"m\"\ncontext_window = 2000",
+        ] {
+            let fp = fingerprint_config(&parse_config_toml(&toml_with(line)));
+            assert_ne!(base, fp, "S2b: {line} must change the fingerprint");
+        }
+        // S4: a routeless provider is invisible.
+        let provider_only = fingerprint_config(&parse_config_toml(
+            r#"
+[server]
+hide_bundled_models = false
+[providers.ds]
+base_url = "http://x"
+api_key = "k"
+format = "chat"
+[providers.extra]
+base_url = "http://y"
+api_key = "k"
+format = "responses"
+[routes."ds/a"]
+model = "m"
+context_window = 1000
+"#,
+        ));
+        assert_eq!(
+            base, provider_only,
+            "S4: routeless provider must not change the fingerprint"
+        );
+    }
+
+    #[tokio::test]
+    async fn config_change_waits_for_fresh_body() {
+        // Reload-staleness spec §Design B: a get arriving after a config
+        // change must NOT return the pre-change body (codex persists it).
+        // The gate stays OPEN — the refresh completes quickly and the get
+        // returns the NEW body.
+        static GATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+        fn gated() -> Vec<Value> {
+            while !GATE.load(std::sync::atomic::Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            marker_discovery()
+        }
+        let cfg = Arc::new(RwLock::new(config_with_flag("ds/a", true)));
+        let cache = Arc::new(CatalogCache {
+            inner: Mutex::new(None),
+            refreshing: Default::default(),
+            discovery: gated,
+        });
+        let (etag1, _) = cache.get(&cfg).await; // cold: ds/a
+        *cfg.write().await = config_with_flag("ds/b", true);
+        let (etag2, body2) = cache.get(&cfg).await;
+        assert_ne!(etag2, etag1, "get must not serve the pre-change body");
+        assert!(
+            body2.windows(4).any(|w| w == b"ds/b"),
+            "get after a config change must reflect the new config"
+        );
+    }
+
+    /// The SWR trade survives only for TIME-based staleness: with the
+    /// fingerprint UNCHANGED (60s recheck coming due), the aged get returns
+    /// the old body immediately while a gated background refresh runs.
+    #[tokio::test]
+    async fn time_stale_get_returns_immediately_and_refreshes_in_background() {
         static GATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
         fn gated() -> Vec<Value> {
             while !GATE.load(std::sync::atomic::Ordering::SeqCst) {
@@ -581,49 +785,55 @@ context_window = 1000
             discovery: gated,
         });
         let (etag1, _) = cache.get(&cfg).await; // cold: fresh build (gate open)
-                                                // Fingerprint change -> stale; close the gate so refresh cannot finish.
+        {
+            // Age the entry WITHOUT changing the config: recheck due, but
+            // the fingerprint still matches.
+            let mut inner = cache.inner.lock().unwrap();
+            inner.as_mut().unwrap().checked_at =
+                std::time::Instant::now() - (TEMPLATE_RECHECK_INTERVAL + Duration::from_secs(1));
+        }
         GATE.store(false, std::sync::atomic::Ordering::SeqCst);
-        *cfg.write().await = config_with_flag("ds/b", true);
         let start = std::time::Instant::now();
         let (etag2, _) = cache.get(&cfg).await;
         assert!(
             start.elapsed() < Duration::from_millis(500),
-            "stale get must not wait for the gated refresh (took {:?})",
+            "time-stale get must not wait for the gated refresh (took {:?})",
             start.elapsed()
         );
-        assert_eq!(etag2, etag1, "stale get must return the OLD body's etag");
-        // Let the background refresh finish, then the next get is fresh.
+        assert_eq!(
+            etag2, etag1,
+            "time-stale get must return the OLD body's etag"
+        );
+        // Let the background refresh finish, then the next get is fresh again.
         GATE.store(true, std::sync::atomic::Ordering::SeqCst);
         tokio::time::sleep(Duration::from_millis(100)).await;
         let _ = cache.refreshing.lock().await;
-        let (etag3, body3) = cache.get(&cfg).await;
-        assert_ne!(etag3, etag1);
+        let (_, body3) = cache.get(&cfg).await;
         assert!(
-            body3.windows(4).any(|w| w == b"ds/b"),
-            "refreshed body must contain ds/b"
+            body3.windows(4).any(|w| w == b"ds/a"),
+            "rebuilt body must still serve the unchanged config"
         );
     }
 
     #[tokio::test]
-    async fn single_flight_merges_concurrent_stale_gets() {
+    async fn single_flight_merges_concurrent_config_changed_gets() {
+        // Reload-staleness spec: after a config change the concurrent gets
+        // WAIT for the refresh, so the gate must stay open (a closed gate
+        // would deadlock waiters against the join below). The single-flight
+        // contract shows up as exactly ONE refresh serving all eight.
         #![allow(unused_must_use)]
-        static GATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
         static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        fn counting_gated() -> Vec<Value> {
+        fn counting() -> Vec<Value> {
             CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            while !GATE.load(std::sync::atomic::Ordering::SeqCst) {
-                std::thread::sleep(Duration::from_millis(5));
-            }
             marker_discovery()
         }
         let cfg = Arc::new(RwLock::new(config_with_flag("ds/a", true)));
         let cache = Arc::new(CatalogCache {
             inner: Mutex::new(None),
             refreshing: Default::default(),
-            discovery: counting_gated,
+            discovery: counting,
         });
         let _ = cache.get(&cfg).await; // cold build: CALLS == 1
-        GATE.store(false, std::sync::atomic::Ordering::SeqCst);
         *cfg.write().await = config_with_flag("ds/b", true);
         let mut joins = Vec::new();
         for _ in 0..8 {
@@ -631,28 +841,35 @@ context_window = 1000
             let cfg2 = Arc::clone(&cfg);
             joins.push(tokio::spawn(async move { c.get(&cfg2).await }));
         }
+        let mut new_bodies = 0;
         for j in joins {
-            let _ = j.await.unwrap();
+            let (_, body) = j.await.unwrap();
+            assert!(
+                body.windows(4).any(|w| w == b"ds/b"),
+                "every concurrent get must reflect the new config"
+            );
+            new_bodies += 1;
         }
-        // Upper bound only: whether the single-flight winner's blocking
-        // discovery closure has STARTED by this point is blocking-pool
-        // scheduling timing, not something the joined gets await on. The
-        // gate is still closed here, so a second refresh cannot have begun;
-        // the exact `== 2` check below runs after the deterministic
-        // refreshing-lock barrier.
-        assert!(
-            CALLS.load(std::sync::atomic::Ordering::SeqCst) <= 2,
-            "at most one background refresh may start (1 cold + 1 refresh); \
-             single-flight must not run one per concurrent get"
+        assert_eq!(new_bodies, 8);
+        // Exactly one extra refresh: the single-flight winner. Every loser
+        // re-checks fast_hit after acquiring the lock and returns without
+        // discovering.
+        assert_eq!(
+            CALLS.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "1 cold + 1 shared refresh; single-flight must not run one per concurrent get"
         );
-        GATE.store(true, std::sync::atomic::Ordering::SeqCst);
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let _ = cache.refreshing.lock().await;
-        assert_eq!(CALLS.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
-    async fn refresh_result_discarded_when_config_changes_mid_refresh() {
+    async fn refresh_discarded_mid_refresh_converges_on_next_wait() {
+        // Reload-staleness spec: a refresh whose config snapshot was
+        // superseded mid-flight is DISCARDED by the fingerprint guard. Under
+        // the wait semantics the requester does not return stale — it loops
+        // (forced second refresh) and converges to the newest config.
+        // Q3 fallback: even if the loop's last store still mismatches (a
+        // further write raced), the requester serves the stored body rather
+        // than failing — here the loop converges, so the body IS ds/c.
         static GATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
         fn gated() -> Vec<Value> {
             while !GATE.load(std::sync::atomic::Ordering::SeqCst) {
@@ -666,32 +883,34 @@ context_window = 1000
             refreshing: Default::default(),
             discovery: gated,
         });
-        let (etag1, _) = cache.get(&cfg).await; // ds/a entry
+        let _ = cache.get(&cfg).await; // ds/a entry (gate open)
         GATE.store(false, std::sync::atomic::Ordering::SeqCst);
-        *cfg.write().await = config_with_flag("ds/b", true); // triggers refresh #1
-        let _ = cache.get(&cfg).await; // spawns refresh (gated)
-                                       // Yield so the spawned task polls and reads the config snapshot
-                                       // (ds/b) BEFORE the test's mid-refresh write; under current_thread
-                                       // the spawned task is not polled between the spawn and this yield.
+        *cfg.write().await = config_with_flag("ds/b", true);
+        // The changed-config get now WAITS inside refresh_if_stale: run it
+        // as a task so the test can interleave the mid-refresh write.
+        let task = {
+            let c = Arc::clone(&cache);
+            let cfg2 = Arc::clone(&cfg);
+            tokio::spawn(async move { c.get(&cfg2).await })
+        };
+        // Yield so the spawned task polls, wins the single-flight lock and
+        // reads its config snapshot (ds/b) BEFORE the mid-refresh write;
+        // under current_thread the spawned task is not polled between the
+        // spawn and this yield.
         tokio::task::yield_now().await;
         *cfg.write().await = config_with_flag("ds/c", true); // mid-refresh change
         GATE.store(true, std::sync::atomic::Ordering::SeqCst);
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let _ = cache.refreshing.lock().await; // refresh #1 completes -> discarded
-                                               // Entry still holds ds/a; this get returns stale and triggers
-                                               // refresh #2 (gate now open, completes fast).
-        let (etag_stale, _) = cache.get(&cfg).await;
-        assert_eq!(
-            etag_stale, etag1,
-            "discarded refresh must leave the old entry"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let _ = cache.refreshing.lock().await;
-        let (_, body3) = cache.get(&cfg).await;
+        // Refresh #1 (ds/b snapshot) completes and is discarded; the
+        // requester's forced second refresh stores ds/c and the get returns.
+        let (_, body) = task.await.unwrap();
         assert!(
-            body3.windows(4).any(|w| w == b"ds/c"),
-            "second refresh must converge to ds/c"
+            body.windows(4).any(|w| w == b"ds/c"),
+            "the waiting get must converge to the newest config, got: {}",
+            String::from_utf8_lossy(&body)
         );
+        // Converged state is stable: a further get is a fast hit.
+        let (_, body2) = cache.get(&cfg).await;
+        assert!(body2.windows(4).any(|w| w == b"ds/c"));
     }
 
     #[tokio::test]
@@ -751,14 +970,14 @@ context_window = 1000
             marker_discovery()
         }
         async fn release_with_flip(
-            cfg: &Arc<RwLock<crate::config::ValidatedConfig>>,
+            cfg: Arc<RwLock<crate::config::ValidatedConfig>>,
             n: usize,
-            route: &str,
+            route: String,
         ) {
             while CALLS.load(Ordering::SeqCst) < n {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
-            *cfg.write().await = config_with_flag(route, true);
+            *cfg.write().await = config_with_flag(&route, true);
             GATE.store(true, Ordering::SeqCst);
         }
 
@@ -774,12 +993,12 @@ context_window = 1000
             async move { c.get(&cfg2).await }
         });
         // refresh #1 (ds/a) is discarded by the ds/b write mid-refresh ...
-        release_with_flip(&cfg, 1, "ds/b").await;
+        release_with_flip(Arc::clone(&cfg), 1, "ds/b".to_string()).await;
         // ... and refresh #2 (ds/b) ALSO races a config write (ds/c lands
         // mid-refresh): the retry is FORCED, so it stores the ds/b snapshot
         // and the getter answers instead of panicking (pre-fix code hit
         // stale_entry's expect right here).
-        release_with_flip(&cfg, 2, "ds/c").await;
+        release_with_flip(Arc::clone(&cfg), 2, "ds/c".to_string()).await;
         let (etag1, body1) = getter
             .await
             .expect("cold get must not panic under repeated discards");
@@ -787,13 +1006,20 @@ context_window = 1000
         // design; the next request's fingerprint check refreshes to ds/c.
         assert!(body1.windows(4).any(|w| w == b"ds/b"));
         assert!(!etag1.is_empty());
-        // Convergence: the next get serves the stale ds/b entry and spawns
-        // a background refresh against the stable ds/c config.
+        // Convergence: under the wait semantics the next get (fingerprint
+        // mismatch) BLOCKS on its refresh, so the gate token must be
+        // released from a helper task — main is inside the get and cannot
+        // release it itself (self-deadlock under the old stale-return
+        // harness). The get then converges straight to ds/c.
+        let releaser = tokio::spawn(release_with_flip(Arc::clone(&cfg), 3, "ds/c".to_string()));
         let (_, body2) = cache.get(&cfg).await;
-        assert!(body2.windows(4).any(|w| w == b"ds/b"));
-        release_with_flip(&cfg, 3, "ds/c").await;
-        #[allow(unused_must_use)]
-        cache.refreshing.lock().await;
+        assert!(
+            body2.windows(4).any(|w| w == b"ds/c"),
+            "waiting get must converge to the newest config"
+        );
+        releaser.await.unwrap();
+        // Converged state is stable: a further get is a fast hit (no gate
+        // token needed).
         let (etag3, body3) = cache.get(&cfg).await;
         assert!(body3.windows(4).any(|w| w == b"ds/c"));
         assert_ne!(etag1, etag3);
