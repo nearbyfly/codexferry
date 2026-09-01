@@ -240,6 +240,33 @@ async fn unknown_model_returns_400() {
     assert!(env.mock_state.received_requests.lock().await.is_empty());
 }
 
+/// Coverage-infra spec Task 1 pin: RouterGuard::drop must terminate the
+/// child promptly (SIGTERM graceful path, NOT an unbounded wait) and reap
+/// the zombie. A regression to an unbounded wait hangs the whole suite
+/// here; a non-reaping drop leaks zombies.
+#[test]
+fn router_guard_drop_terminates_and_reaps_promptly() {
+    let dir = tempfile::tempdir().unwrap();
+    let child = std::process::Command::new("sleep")
+        .arg("5")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let guard = RouterGuard {
+        child,
+        stderr_path: dir.path().join("log"),
+        _dir: dir,
+    };
+    let start = std::time::Instant::now();
+    drop(guard);
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(3),
+        "drop must terminate the child promptly, took {:?}",
+        start.elapsed()
+    );
+}
+
 #[tokio::test]
 /// Review E1: axum's default request-body limit is 2 MiB, and codex replays
 /// its full transcript inline every turn (`store: false`) — long sessions

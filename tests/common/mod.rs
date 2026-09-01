@@ -835,12 +835,37 @@ pub struct RouterGuard {
 }
 
 impl Drop for RouterGuard {
-    // kill() + wait() = SIGKILL then reap the zombie; both are
-    // best-effort (`let _ =`) because the child may already have
+    // SIGTERM first: the router handles SIGTERM gracefully (axum
+    // with_graceful_shutdown — in-flight requests finish, main returns),
+    // which is both production-faithful (systemd-style stop) AND required
+    // for coverage: LLVM counters flush to .profraw only at graceful
+    // process exit, so a bare SIGKILL would lose them and integration
+    // runs would report the router's handlers at ~0% (coverage-infra
+    // spec §Design Part 1). Bounded wait; SIGKILL only as the fallback
+    // for a pathological in-flight hang. Both paths reap the zombie;
+    // every step is best-effort (`let _ =`) because the child may have
     // exited on its own.
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        #[cfg(unix)]
+        {
+            unsafe {
+                libc::kill(self.child.id() as libc::pid_t, libc::SIGTERM);
+            }
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while self.child.try_wait().ok().flatten().is_none() {
+                if std::time::Instant::now() >= deadline {
+                    let _ = self.child.kill(); // SIGKILL fallback; counters lost
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            let _ = self.child.wait(); // reap
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
     }
 }
 

@@ -315,6 +315,11 @@ Codex CLI ──POST /v1/responses──▶ axum daemon (127.0.0.1:8787)
 - **E2E scripts** (`scripts/e2e.sh`, `scripts/e2e-real.sh`) drive the real
   Codex CLI against a scripted mock (`src/bin/e2e-mock.rs`) or real upstreams.
   They are manual tools outside `cargo test`; see README "End-to-End Tests".
+- **Coverage** runs via `scripts/coverage.sh unit|integration|e2e`
+  (cargo-llvm-cov; see README-DETAILS "Test coverage"). The integration
+  layer depends on RouterGuard's graceful teardown — do not replace the
+  SIGTERM-first drop with a bare SIGKILL, or router subprocess coverage
+  silently drops to ~0%.
 - The default `codexferry doctor` run composes L1 + L2 offline checks then the
   L3 live probe into one report; `--offline` / `--live` select the stages
   (see `docs/superpowers/specs/2026-08-23-mode-aware-doctor-design.md`).

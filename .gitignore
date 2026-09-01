@@ -8,3 +8,4 @@
 # may still carry `config.toml` (the resolver falls back to it with a warning).
 /cxf.toml
 /config.toml
+coverage/
