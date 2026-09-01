@@ -56,11 +56,18 @@ impl CodexVersionTracker {
 
     /// Update `current` on every call; return `Some(Transition)` only when
     /// `version` is newly added to `seen` (its first sighting this process).
+    ///
+    /// Past [`MAX_TRACKED_VERSIONS`] distinct labels, new labels are treated
+    /// as already-seen (silent): `client_version` is caller-supplied and the
+    /// set previously grew one permanent entry per distinct string. The cap
+    /// keeps the set — and the per-version metric series — bounded; real
+    /// deployments see a handful of versions.
     pub fn observe(&self, version: &str) -> Option<Transition> {
         let mut current = self.current.lock().unwrap();
         let from = current.clone();
         *current = Some(version.to_string());
-        if self.seen.lock().unwrap().insert(version.to_string()) {
+        let mut seen = self.seen.lock().unwrap();
+        if seen.len() < MAX_TRACKED_VERSIONS && seen.insert(version.to_string()) {
             Some(Transition {
                 from,
                 to: version.to_string(),
@@ -70,6 +77,10 @@ impl CodexVersionTracker {
         }
     }
 }
+
+/// Per-process cap on the [`CodexVersionTracker`] `seen` set: past this many
+/// distinct labels, new ones stay silent (see [`CodexVersionTracker::observe`]).
+const MAX_TRACKED_VERSIONS: usize = 64;
 
 /// Result of the most recent doctor run (spec §3.1). Timestamped as epoch
 /// seconds — the repo deliberately has no chrono dependency.

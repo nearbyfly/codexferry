@@ -914,7 +914,7 @@ async fn spawn_config_applier(
     while let Some(new_cfg) = rx.recv().await {
         *shared.write().await = new_cfg;
         tracing::info!("config reloaded successfully");
-        invalidate_codex_catalog_cache();
+        invalidate_codex_catalog_cache().await;
     }
 }
 
@@ -935,16 +935,20 @@ async fn spawn_config_applier(
 /// No-op in static mode (codex never writes `models_cache.json` when a
 /// `model_catalog_json` pin is in effect) and when the file is absent
 /// already.
-fn invalidate_codex_catalog_cache() {
+async fn invalidate_codex_catalog_cache() {
     let Some(path) = codex_catalog_cache_path() else {
         return;
     };
-    match invalidate_path(&path) {
-        Ok(()) => tracing::info!("invalidated codex catalog cache at {}", path.display()),
-        Err(e) => tracing::warn!(
-            "failed to invalidate codex catalog cache ({}): {e}",
-            path.display()
-        ),
+    let path_display = path.display().to_string();
+    // Unlink on the blocking pool: this runs on the hot-reload applier
+    // task, and a remove on a slow/hung mount must not park a runtime
+    // worker (same discipline as the other config-file I/O).
+    match tokio::task::spawn_blocking(move || invalidate_path(&path)).await {
+        Ok(Ok(())) => tracing::info!("invalidated codex catalog cache at {path_display}"),
+        Ok(Err(e)) => {
+            tracing::warn!("failed to invalidate codex catalog cache ({path_display}): {e}")
+        }
+        Err(e) => tracing::warn!("failed to invalidate codex catalog cache ({path_display}): {e}"),
     }
 }
 

@@ -394,6 +394,13 @@ pub(crate) fn warn_dropped_tool_types(label: &str, types: &[String]) {
 static UNKNOWN_TYPE_COUNTS: LazyLock<Mutex<HashMap<String, u64>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Upper bound on distinct keys in [`UNKNOWN_TYPE_COUNTS`]. The key space is
+/// client-controlled (unknown item/tool type strings), so an unbounded map
+/// is an unbounded-memory vector; past this cap new keys are still warned
+/// about but not remembered (their displayed total reflects only the current
+/// call). 256 is far beyond every real dialect's type vocabulary.
+const MAX_UNKNOWN_TYPE_KEYS: usize = 256;
+
 /// Log one warn line for unknown input item types in `items`, bumping the
 /// process-lifetime counters. `disposition` names what happens to the
 /// unknown items on this path — `"passed through"` for the Responses
@@ -434,9 +441,26 @@ fn bump_and_warn(label: &str, types: &[String]) {
         .iter()
         .filter(|t| seen.insert(t.as_str()))
         .map(|t| {
-            let n = counts.entry(t.clone()).or_insert(0);
-            *n += 1;
-            format!("{t} (total {n})")
+            // Computed before the match: the `get_mut` borrow must not be
+            // alive while `counts` is read again.
+            let at_cap = counts.len() >= MAX_UNKNOWN_TYPE_KEYS;
+            match counts.get_mut(t.as_str()) {
+                Some(n) => {
+                    *n += 1;
+                    format!("{t} (total {n})")
+                }
+                None if at_cap => {
+                    // Counter map full: warn without persisting so the map
+                    // (and the process heap) stays bounded on client-
+                    // controlled key spam.
+                    format!("{t} (untracked: counter map at cap)")
+                }
+                None => {
+                    let n = counts.entry(t.clone()).or_insert(0);
+                    *n += 1;
+                    format!("{t} (total {n})")
+                }
+            }
         })
         .collect();
     tracing::warn!("{label}: {}", parts.join(", "));

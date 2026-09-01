@@ -387,15 +387,13 @@ fn load_template(
         );
     }
 
-    // 2. Try `codex debug models --bundled`
-    if let Ok(output) = std::process::Command::new("codex")
-        .args(["debug", "models", "--bundled"])
-        .output()
-    {
-        if output.status.success() {
-            if let Ok(val) = serde_json::from_slice(&output.stdout) {
-                return Ok(Some((std::path::PathBuf::new(), val)));
-            }
+    // 2. Try `codex debug models --bundled` — bounded by the same deadline
+    // as every other shell-out: this runs on the /models single-flight
+    // refresh path, so a hung `codex` here would wedge every cold-start
+    // catalog request behind it.
+    if let Some(stdout) = bundled_command_stdout("codex", BUNDLED_DISCOVERY_TIMEOUT) {
+        if let Ok(val) = serde_json::from_slice(&stdout) {
+            return Ok(Some((std::path::PathBuf::new(), val)));
         }
     }
 
@@ -485,13 +483,30 @@ fn bundled_from_command(cmd: &str) -> Vec<Value> {
 /// Split out so the timeout path is testable without waiting out the real
 /// 10s constant.
 fn bundled_from_command_with_timeout(cmd: &str, timeout: Duration) -> Vec<Value> {
+    bundled_command_stdout(cmd, timeout)
+        .map(|stdout| parse_bundled_output(&stdout))
+        .unwrap_or_default()
+}
+
+/// Run `cmd debug models --bundled` bounded by `timeout`; return the raw
+/// stdout on a zero-exit run, `None` on spawn failure, non-zero exit, or
+/// timeout (child killed, reaped). The single bounded runner shared by BOTH
+/// shell-out call sites — [`bundled_from_command_with_timeout`] (hide
+/// overrides) and [`load_template`] tier 2 (template discovery) — so neither
+/// can wedge its caller on a hung `codex` (load_template's tier-2
+/// previously used bare `Command::output()`, which has no deadline, while
+/// running inside the /models single-flight refresh).
+///
+/// stdout is drained on a reader thread while the deadline is polled, so a
+/// large catalog cannot deadlock the child on the pipe buffer.
+fn bundled_command_stdout(cmd: &str, timeout: Duration) -> Option<Vec<u8>> {
     let Ok(mut child) = std::process::Command::new(cmd)
         .args(["debug", "models", "--bundled"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
     else {
-        return Vec::new();
+        return None;
     };
     // Read stdout on a separate thread so a large catalog (real codex emits
     // ~315 KB, far beyond the 64 KB pipe buffer) cannot deadlock the child on
@@ -511,7 +526,13 @@ fn bundled_from_command_with_timeout(cmd: &str, timeout: Duration) -> Vec<Value>
             buf
         }) {
         Ok(handle) => handle,
-        Err(_) => return Vec::new(),
+        // The child would keep running with no reader; reap it before
+        // degrading.
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
     };
     let deadline = std::time::Instant::now() + timeout;
     let status = loop {
@@ -521,15 +542,15 @@ fn bundled_from_command_with_timeout(cmd: &str, timeout: Duration) -> Vec<Value>
         if std::time::Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            return Vec::new();
+            return None;
         }
         std::thread::sleep(Duration::from_millis(20));
     };
     let stdout = reader.join().unwrap_or_default();
     if !status.success() {
-        return Vec::new();
+        return None;
     }
-    parse_bundled_output(&stdout)
+    Some(stdout)
 }
 
 /// Parse the `{"models": [...]}` stdout of `codex debug models --bundled`.
