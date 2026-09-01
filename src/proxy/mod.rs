@@ -157,24 +157,50 @@ const FIRST_CONTENT_MARKERS: [&str; 3] = [
 /// across chunk boundaries still matches (same boundary concern as the
 /// hand-written SSE parser, AGENTS.md #2). The forwarded bytes are never
 /// modified; this only reads them.
+///
+/// Allocation-free on the steady-state relay path: a marker lying entirely
+/// within `carry` was necessarily found by the previous call (the carry is
+/// the tail of that call's scanned region), so only two regions need
+/// scanning — `chunk` itself, and the cross-boundary stitches of a carry
+/// suffix plus a chunk prefix — and the carry update reuses the Vec's
+/// capacity (`clear`/`drain` + `extend`) instead of reallocating.
 fn first_content_event_bytes(chunk: &[u8], carry: &mut Vec<u8>) -> bool {
-    let mut haystack = Vec::with_capacity(carry.len() + chunk.len());
-    haystack.extend_from_slice(carry);
-    haystack.extend_from_slice(chunk);
     let hit = FIRST_CONTENT_MARKERS.iter().any(|marker| {
-        haystack
-            .windows(marker.len())
-            .any(|w| w == marker.as_bytes())
+        let m = marker.as_bytes();
+        if chunk.windows(m.len()).any(|w| w == m) {
+            return true;
+        }
+        // Cross-boundary: marker starts at carry[start..], finishes in the
+        // chunk prefix. Starts whose suffix outgrows the marker would be
+        // fully-inside-carry matches — skipped by the invariant above (and
+        // guarded here against underflow, since carry can outgrow the
+        // shortest marker).
+        (0..carry.len()).any(|start| {
+            let from_carry = carry.len() - start;
+            from_carry <= m.len()
+                && carry[start..] == m[..from_carry]
+                && m.len() - from_carry <= chunk.len()
+                && chunk[..m.len() - from_carry] == m[from_carry..]
+        })
     });
+    // Keep the last (longest marker − 1) bytes of (carry + chunk) as the
+    // next carry. In-place Vec operations only: capacity is retained, so
+    // steady-state relaying allocates nothing.
     let max_marker_len = FIRST_CONTENT_MARKERS
         .iter()
         .map(|m| m.len())
         .max()
         .unwrap_or(0);
-    let keep = haystack
-        .len()
-        .saturating_sub(max_marker_len.saturating_sub(1));
-    *carry = haystack[keep..].to_vec();
+    let keep = (max_marker_len.saturating_sub(1)).min(carry.len() + chunk.len());
+    if chunk.len() >= keep {
+        // The new carry comes entirely out of chunk's tail.
+        carry.clear();
+        carry.extend_from_slice(&chunk[chunk.len() - keep..]);
+    } else {
+        let from_carry = keep - chunk.len();
+        carry.drain(..carry.len() - from_carry);
+        carry.extend_from_slice(chunk);
+    }
     hit
 }
 

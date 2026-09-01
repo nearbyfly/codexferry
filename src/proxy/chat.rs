@@ -59,22 +59,29 @@ pub(super) async fn handle_chat_format(
     let timeout = Duration::from_millis(route.provider.timeout_ms);
     // Provider escape hatches (chat path only): strip named fields, then
     // merge extras — extra wins over the converted body on collision.
-    let mut chat_body =
-        serde_json::to_value(&chat_req).expect("ChatRequest serialization cannot fail");
-    if let Some(obj) = chat_body.as_object_mut() {
-        if let Some(drop_params) = &route.provider.drop_params {
-            for key in drop_params {
-                obj.remove(key);
-            }
-        }
-        if let Some(extra) = &route.provider.extra_params {
-            for (key, value) in extra {
-                obj.insert(key.clone(), value.clone());
-            }
-        }
-    }
+    // Without either configured (the common case), serialize the typed
+    // request DIRECTLY: one traversal, and no Value tree materialized for
+    // a potentially transcript-sized body.
     let chat_req_json =
-        serde_json::to_vec(&chat_body).expect("ChatRequest serialization cannot fail");
+        if route.provider.drop_params.is_none() && route.provider.extra_params.is_none() {
+            serde_json::to_vec(&chat_req).expect("ChatRequest serialization cannot fail")
+        } else {
+            let mut chat_body =
+                serde_json::to_value(&chat_req).expect("ChatRequest serialization cannot fail");
+            if let Some(obj) = chat_body.as_object_mut() {
+                if let Some(drop_params) = &route.provider.drop_params {
+                    for key in drop_params {
+                        obj.remove(key);
+                    }
+                }
+                if let Some(extra) = &route.provider.extra_params {
+                    for (key, value) in extra {
+                        obj.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+            serde_json::to_vec(&chat_body).expect("ChatRequest serialization cannot fail")
+        };
     // Log the outbound body when CODEXFERRY_TRACE_BODY=1.
     trace_body("upstream request", &chat_req_json);
     let in_flight = InFlightGuard::new(state.metrics.clone(), &route.provider_name, &req.model);

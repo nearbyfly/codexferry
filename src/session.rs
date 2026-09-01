@@ -70,13 +70,19 @@ struct SessionEntry {
     /// Last access time; drives both the sliding TTL and LRU eviction.
     /// Refreshed on every `save` and on every `get` hit.
     last_used_at: SystemTime,
+    /// Cheap size estimate for this entry (sum of the serialized length of
+    /// each item), computed ONCE at insert time. Cached so the memory
+    /// budget can be tracked with a running total instead of
+    /// re-serializing the whole store on every save.
+    estimated_bytes: usize,
 }
 
 /// The shared mutable store behind [`SessionStore`].
 ///
 /// `sessions` maps a response ID to its full-context entry. The remaining
 /// fields are the enforced limits, copied from the config's `[session]`
-/// section at construction time.
+/// section at construction time, plus the running byte total that keeps
+/// the memory budget off the per-save hot path.
 struct SessionState {
     /// response_id → conversation entry.
     sessions: HashMap<String, SessionEntry>,
@@ -86,6 +92,10 @@ struct SessionState {
     max_sessions: usize,
     /// Memory budget in bytes (LRU eviction beyond this).
     max_memory_bytes: usize,
+    /// Running sum of every entry's `estimated_bytes`. Maintained
+    /// incrementally by the insert/remove paths — the budget check is
+    /// then O(1) per save instead of a full-store re-serialization.
+    total_bytes: usize,
 }
 
 impl SessionStore {
@@ -101,6 +111,7 @@ impl SessionStore {
                 ttl: Duration::from_secs(ttl_hours * 3600),
                 max_sessions,
                 max_memory_bytes: max_memory_mb * 1024 * 1024,
+                total_bytes: 0,
             })),
         }
     }
@@ -135,6 +146,8 @@ impl SessionStore {
         let mut state = self.state.write().await;
         // Rough size estimate: sum of the serialized length of each item.
         // Not the exact JSON size, but cheap and good enough for a budget.
+        // Computed once for the NEW entry only — the store-wide budget is
+        // tracked by the running `total_bytes` counter.
         let estimated_bytes: usize = items.iter().map(|v| v.to_string().len()).sum();
         // Skip if single session exceeds total budget
         if estimated_bytes > state.max_memory_bytes {
@@ -143,14 +156,19 @@ impl SessionStore {
             );
             return;
         }
-        state.sessions.insert(
+        // Replacing an existing entry (same id) must not leak its old bytes.
+        if let Some(old) = state.sessions.insert(
             id,
             SessionEntry {
                 items,
                 // Inserting is itself a "use": start the sliding TTL clock now.
                 last_used_at: SystemTime::now(),
+                estimated_bytes,
             },
-        );
+        ) {
+            state.total_bytes = state.total_bytes.saturating_sub(old.estimated_bytes);
+        }
+        state.total_bytes += estimated_bytes;
         state.enforce_limits();
     }
 
@@ -201,6 +219,10 @@ impl SessionState {
     /// byte-budget loop stops at one remaining session — a single huge
     /// session is allowed to stay rather than evict itself (its size was
     /// already checked at insert time by `save`).
+    ///
+    /// The budget check is O(1) per iteration: `total_bytes` is maintained
+    /// incrementally by [`SessionStore::save`] and the removal helpers, so
+    /// eviction no longer re-serializes the whole store per save.
     fn enforce_limits(&mut self) {
         self.remove_expired();
         // LRU by last_used_at
@@ -208,21 +230,9 @@ impl SessionState {
             self.remove_oldest();
         }
         // Memory limit (rough estimate by string length)
-        while self.estimated_bytes() > self.max_memory_bytes && self.sessions.len() > 1 {
+        while self.total_bytes > self.max_memory_bytes && self.sessions.len() > 1 {
             self.remove_oldest();
         }
-    }
-
-    /// Total estimated memory usage across all sessions.
-    ///
-    /// Sums the serialized length of every item in every session. String
-    /// length is a cheap upper-ish bound on the JSON values' heap usage —
-    /// deliberately simple, no allocator introspection.
-    fn estimated_bytes(&self) -> usize {
-        self.sessions
-            .values()
-            .map(|e| e.items.iter().map(|v| v.to_string().len()).sum::<usize>())
-            .sum()
     }
 
     /// Drop sessions whose `last_used_at` is older than the TTL window.
@@ -242,7 +252,7 @@ impl SessionState {
             .map(|(k, _)| k.clone())
             .collect();
         for id in expired {
-            self.sessions.remove(&id);
+            self.remove_entry(&id);
         }
     }
 
@@ -259,7 +269,16 @@ impl SessionState {
             .min_by_key(|(_, e)| e.last_used_at)
             .map(|(k, _)| k.clone())
         {
-            self.sessions.remove(&id);
+            self.remove_entry(&id);
+        }
+    }
+
+    /// Remove one entry by id, decrementing the running byte total. The
+    /// single removal path for eviction and expiry so `total_bytes` cannot
+    /// drift from the stored entries.
+    fn remove_entry(&mut self, id: &str) {
+        if let Some(entry) = self.sessions.remove(id) {
+            self.total_bytes = self.total_bytes.saturating_sub(entry.estimated_bytes);
         }
     }
 }
@@ -336,5 +355,43 @@ mod tests {
         let big = "x".repeat(2 * 1024 * 1024);
         store.save(id.clone(), vec![json!(big)]).await;
         assert!(store.get(&id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn byte_budget_evicts_oldest() {
+        // 1 MiB budget, ~0.7 MiB entries: saving a, b must evict a (the
+        // oldest) to stay under budget; saving c must then evict b. This
+        // exercises the running-counter budget loop (subtract on evict).
+        let store = SessionStore::new(168, 256, 1); // 1 MiB budget
+        let a = store.new_response_id();
+        let b = store.new_response_id();
+        let c = store.new_response_id();
+        let kib = |n: usize| json!("x".repeat(n * 1024));
+        store.save(a.clone(), vec![kib(700)]).await; // ~0.7 MiB
+        store.save(b.clone(), vec![kib(700)]).await; // ~1.4 MiB total → evict a
+        assert!(store.get(&a).await.is_none(), "a must be evicted by budget");
+        assert!(store.get(&b).await.is_some());
+        store.save(c.clone(), vec![kib(700)]).await; // → evict b
+        assert!(store.get(&b).await.is_none(), "b must be evicted by budget");
+        assert!(store.get(&c).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn replacing_entry_does_not_leak_budget_bytes() {
+        // Saving twice under the SAME id must subtract the old entry's
+        // bytes. With ~0.4 MiB entries and a 1 MiB budget, correct
+        // accounting keeps both live entries at ~0.8 MiB total; a leaked
+        // old entry would push the counter to ~1.2 MiB and evict the
+        // first one.
+        let store = SessionStore::new(168, 256, 1); // 1 MiB budget
+        let id = store.new_response_id();
+        let kib = |n: usize| json!("x".repeat(n * 1024));
+        store.save(id.clone(), vec![kib(400)]).await; // ~0.4 MiB
+        store.save(id.clone(), vec![kib(400)]).await; // replace, not append
+        store.save(store.new_response_id(), vec![kib(400)]).await;
+        assert!(
+            store.get(&id).await.is_some(),
+            "replaced entry's old bytes must be subtracted, not leaked"
+        );
     }
 }
