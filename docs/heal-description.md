@@ -174,12 +174,12 @@ think 解析细节：
 | 子类 | 流形状修复（与内容修复正交）|
 | 适用路径 | **responses only**（chat 是构造者姿态，天然不碎片）|
 | 触发条件 | 连续同类型 `output_item.added`：`message` / `reasoning` 同 type 直接合并；`function_call` 额外要求 `call_id` 匹配（OpenAI 契约：同 call 必须同 item）|
-| 修复做法 | 把 N 个连续同类型 item 折回 1 个：第 1 个原样透传、后续 N-1 个 added 抑制、deltas 重写 `item_id`/`output_index` 为首碎片、累积 merged_* 文本、run 末尾 flush 合成 `content_part.done` (Message items) + `output_item.done` (Reasoning/FunctionCall items) |
+| 修复做法 | 把 N 个连续同类型 item 折回 1 个：第 1 个原样透传、后续 N-1 个 added 抑制、deltas 重写 `item_id`/`output_index` 为首碎片、累积 merged_* 文本、run 末尾 flush 合成 `content_part.done` (Message items) + `output_item.done` (Reasoning/FunctionCall items)。**run 长度 = 1（未合并）时一切透传**——健康流 byte-identical，包括上游自己的 done 事件与 `response.completed`；合并真正发生后（run 长度 ≥ 2）`response.completed.output` 按碎片原位折叠，未合并 item 原样保留 |
 | 状态位 | `HealGates::merge_fragmented: bool`，默认 `true` |
 | Hook 点 | `src/proxy/passthrough.rs` 的 healed 分支，**插在 `ResponsesStreamHealer` 前面** |
 | 与 healer 的关系 | D-1：merger 只管形状，healer 只管内容。merger 改写后 healer 看到「真的只有一个 item」——**消除了 review #5/#7 的 multi-item 边界** |
 
-模块：`src/heal/merge.rs` + `src/heal/merge_tests.rs`（19 个 fixture，按 M1–M9 / W1–W5 / E1–E4 / S1–S3 / K1 编号）。
+模块：`src/heal/merge.rs` + `src/heal/merge_tests.rs`（26 个 fixture，按 M1–M9 / W1–W7 / E1–E4 / S1–S3 / K1 / F1–F5 编号；F1–F5 为 code-inspection 回归 fixture：健康流 identity、completed.output 保留未合并 item、未知类型穿插、零 delta run、类型不匹配 delta）
 
 设计 spec：`docs/superpowers/specs/2026-08-30-fragmented-items-merger-design.md`。
 NOTES 调查：`NOTES-2026-08-28-minimax-m3-fragmentation.md`（git-exclude，仅本地）。
@@ -187,16 +187,16 @@ NOTES 调查：`NOTES-2026-08-28-minimax-m3-fragmentation.md`（git-exclude，�
 ## 7. heal 模块目录结构
 
 ```
-src/heal/                          共 3987 行（含测试）
+src/heal/                          共 4575 行（含测试）
 ├── mod.rs                          78   HealGates 门面 + 默认全 ON
 ├── dsml.rs                        677   DsmlStreamFilter + heal_dsml_chat_message
 ├── dsml_tests.rs                  386   + parse_leaked_tool_calls + 双 dialect
 ├── think.rs                       192   ThinkStreamFilter + heal_think_chat_message
 ├── think_tests.rs                 152   + contains_think_markup
-├── merge.rs                       452   FragmentedItemMerger + ItemType + RunState
-├── merge_tests.rs                 594   M1–M9 / W1–W5 / E1–E4 / S1–S3 / K1 fixtures
+├── merge.rs                       600   FragmentedItemMerger + ItemType + RunState
+├── merge_tests.rs                1008   M1–M9 / W1–W7 / E1–E4 / S1–S3 / K1 / F1–F5 fixtures
 ├── responses.rs                   611   ResponsesStreamHealer（流式）
-└── responses_healer_tests.rs      845   + heal_responses_body（非流式）
+└── responses_healer_tests.rs      871   + heal_responses_body（非流式）
                                     + INJECT_INDEX_BASE = 10_000
 ```
 
@@ -213,7 +213,8 @@ src/heal/                          共 3987 行（含测试）
 |---|---|---|---|
 | 持有 filter | `dsml_filter`, `think_filter` | `dsml`, `think` | — |
 | 文本累积 | `acc.text`, `acc.reasoning` | `healed_text`, `reasoning_text` | `merged_text`, `merged_reasoning`, `merged_arguments` |
-| 跟踪/状态 | `message_output_index`, `reasoning_output_index` | `message_item_id`, `message_output_index` | `run: Option<RunState { item_type, start_idx, start_id, call_id, merged_*, part_added_emitted }>` |
+| 跟踪/状态 | `message_output_index`, `reasoning_output_index` | `message_item_id`, `message_output_index` | `run: Option<RunState { item_type, start_idx, start_id, call_id, merged_*, part_added_emitted, len, fragment_ids }>`（`len ≥ 2` 才进入合并：抑制/改写/合成；`len = 1` 全透传） |
+| 合并留存 | — | — | `merged_runs: Vec<MergedRunRecord>`（已合并 run 的碎片 id + 合成 item，供 `response.completed.output` 原位折叠） |
 | 下一个分配 index | `next_output_index: usize` | `next_index: usize`（from `INJECT_INDEX_BASE`） | —（不分配新 index；改写现有 index） |
 | tool call 累积 | `tool_calls: BTreeMap<...>` | `injected_calls: Vec<...>` | —（call_id 匹配，不累积） |
 | finish 幂等 | `finish_emitted: bool` | `finished: bool` | γ-1: `finish()` 不合成 done |

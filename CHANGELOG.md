@@ -25,7 +25,13 @@ release is cut, so both remotes receive it through the normal push flow.
   the run boundary. Applies to consecutive same-type `message` /
   `reasoning` items, and to consecutive `function_call` items with
   matching `call_id` (OpenAI Responses contract: same call must live
-  in the same item). Off via `[quirks] disabled = ["merge_fragmented"]`.
+  in the same item). Runs of length 1 (every healthy stream) pass
+  through byte-identical — suppression/rewriting activate only once a
+  second same-type fragment actually arrives, and the rewritten
+  `response.completed.output` collapses the run's fragments in place
+  while keeping all unmerged sibling items. Items of uncovered types
+  (e.g. `web_search_call`) break the run and keep their own events.
+  Off via `[quirks] disabled = ["merge_fragmented"]`.
   Hot-reloadable. Responses-format path only — chat-format path is
   naturally unfragmented.
 
