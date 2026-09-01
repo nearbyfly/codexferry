@@ -124,8 +124,9 @@ when no `finish_reason` was seen (the caller emits the error sequence instead)
 and when called twice (no duplicated items). Zero-payload tool-call deltas
 create no phantom items: a delta with neither id nor function content (index
 announcement) never creates an accumulator entry, and an entry that still has
-neither a name nor arguments at stream end (id-only variant) is dropped rather
-than emitted as a `name: ""` / `arguments: "{}"` function_call. At stream end,
+no NAME at stream end is dropped (id-only and args-only variants alike)
+rather than emitted as a `name: ""` function_call that would replay as an
+unnamed tool_call strict Chat upstreams reject. At stream end,
 complete items are emitted in ascending index order: `output_item.added` (status `in_progress`) →
 `function_call_arguments.delta` (full accumulated args in one shot) →
 `output_item.done` (status `completed`).

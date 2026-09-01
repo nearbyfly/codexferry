@@ -148,3 +148,102 @@ pub(super) fn body_read_failure(
         &format!("failed to read upstream response: {e}"),
     )
 }
+
+/// Read a non-streaming upstream body to completion, capped at `max_bytes`
+/// (the call sites pass `MAX_TRANSFER_BYTES` from the router module).
+///
+/// reqwest's `bytes()` has no size limit — a broken upstream can push
+/// unbounded bytes into memory within its total timeout (review E6). This
+/// walks the chunks and fails with a 502 (recorded as `Network`) once the
+/// cap is crossed; nothing beyond the cap is buffered.
+pub(super) async fn read_body_capped(
+    mut resp: reqwest::Response,
+    max_bytes: usize,
+    metrics: &crate::metrics::Metrics,
+    provider: &str,
+    route: &str,
+    model: &str,
+) -> Result<bytes::Bytes, Response> {
+    let mut buffered: Vec<u8> = Vec::new();
+    loop {
+        match resp.chunk().await {
+            Ok(Some(chunk)) => {
+                if buffered.len() + chunk.len() > max_bytes {
+                    metrics.record_request(
+                        provider,
+                        route,
+                        model,
+                        crate::metrics::ErrorClass::Network,
+                    );
+                    return Err(error_response(
+                        StatusCode::BAD_GATEWAY,
+                        "server_error",
+                        &format!("upstream response body exceeds {max_bytes} bytes"),
+                    ));
+                }
+                buffered.extend_from_slice(&chunk);
+            }
+            Ok(None) => return Ok(bytes::Bytes::from(buffered)),
+            Err(e) => return Err(body_read_failure(&e, metrics, provider, route, model)),
+        }
+    }
+}
+
+#[cfg(test)]
+mod read_body_capped_tests {
+    use super::*;
+
+    fn fake_response(body: Vec<u8>) -> reqwest::Response {
+        reqwest::Response::from(
+            axum::http::Response::builder()
+                .status(200)
+                .body(body)
+                .expect("static response builds"),
+        )
+    }
+
+    #[tokio::test]
+    async fn body_within_cap_reads_fully() {
+        let metrics = crate::metrics::Metrics::new();
+        let body = read_body_capped(
+            fake_response(b"0123456789abc".to_vec()),
+            16,
+            &metrics,
+            "p",
+            "r",
+            "m",
+        )
+        .await
+        .expect("under the cap");
+        assert_eq!(&body[..], b"0123456789abc");
+    }
+
+    #[tokio::test]
+    async fn body_over_cap_fails_with_502_and_records() {
+        let metrics = crate::metrics::Metrics::new();
+        let err = read_body_capped(fake_response(vec![0u8; 17]), 16, &metrics, "p", "r", "m")
+            .await
+            .expect_err("over the cap");
+        assert_eq!(err.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn multi_chunk_body_accumulates_up_to_cap() {
+        // A body whose chunks individually fit but only sum over the cap
+        // must still trip it (the check is on the RUNNING buffered length).
+        let metrics = crate::metrics::Metrics::new();
+        let err = read_body_capped(fake_response(vec![0u8; 12]), 16, &metrics, "p", "r", "m").await;
+        assert!(err.is_ok());
+        let err = read_body_capped(
+            fake_response(b"aaaaaaaaaaaa".to_vec()),
+            8,
+            &metrics,
+            "p",
+            "r",
+            "m",
+        )
+        .await
+        .expect_err("12 bytes over an 8-byte cap");
+        assert_eq!(err.status(), StatusCode::BAD_GATEWAY);
+    }
+}

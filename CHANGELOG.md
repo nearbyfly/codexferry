@@ -35,6 +35,25 @@ release is cut, so both remotes receive it through the normal push flow.
   Hot-reloadable. Responses-format path only — chat-format path is
   naturally unfragmented.
 
+### Fixed
+
+- **Long codex sessions rejected with 413**: the daemon now accepts request
+  bodies up to 64 MiB (axum's 2 MiB default rejected long `store: false`
+  transcript replays). The same cap bounds non-streaming upstream response
+  reads, which previously had no size limit.
+- **`/models` catalog stale after description-only config edit**: the cache
+  fingerprint now includes each route's `description`; previously such an
+  edit never invalidated the served catalog (indefinitely, with a
+  file-backed template and hiding off).
+- **Empty-name tool calls no longer poison session replay**: a streamed
+  tool call whose function name never arrived is dropped at stream end
+  instead of being emitted and persisted with `name: ""` (which strict Chat
+  upstreams reject on the next turn).
+- **`total_tokens` overflow**: computed as u64; two individually valid u32
+  upstream counts no longer overflow (debug panic / release wrap).
+- **`ttl_hours = 0` warns at startup**: it silently disabled the session
+  store (every session expires immediately).
+
 ### Performance
 
 - **Session store**: the memory budget no longer re-serializes every cached

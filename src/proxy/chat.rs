@@ -2,9 +2,7 @@
 //! Extracted from  (module-split spec Phase 2).
 
 use super::capture::{input_items, save_session, store_enabled};
-use super::upstream::{
-    body_read_failure, record_upstream_failure, send_upstream, upstream_non_2xx,
-};
+use super::upstream::{read_body_capped, record_upstream_failure, send_upstream, upstream_non_2xx};
 use super::*;
 
 /// Convert a Responses request to Chat Completions, forward it upstream, and
@@ -410,25 +408,23 @@ pub(super) async fn handle_chat_format(
         let stream = ReceiverStream::new(rx);
         (Sse::new(stream).into_response(), 0, 0)
     } else {
-        // Non-streaming path: read the entire upstream body, then convert.
-        // Bytes are read first (not `upstream_resp.json()`) so the raw body
-        // can be traced and parsing is deferred.
+        // Non-streaming path: read the entire upstream body (capped — see
+        // `read_body_capped`), then convert. Bytes are read first (not
+        // `upstream_resp.json()`) so the raw body can be traced and parsing
+        // is deferred.
         let upstream_status = upstream_resp.status();
-        let resp_bytes = match upstream_resp.bytes().await {
+        let resp_bytes = match read_body_capped(
+            upstream_resp,
+            super::MAX_TRANSFER_BYTES,
+            &state.metrics,
+            &route.provider_name,
+            &req.model,
+            &route.model,
+        )
+        .await
+        {
             Ok(b) => b,
-            Err(e) => {
-                return (
-                    body_read_failure(
-                        &e,
-                        &state.metrics,
-                        &route.provider_name,
-                        &req.model,
-                        &route.model,
-                    ),
-                    0,
-                    0,
-                );
-            }
+            Err(resp) => return (resp, 0, 0),
         };
         // Log the response body when CODEXFERRY_TRACE_BODY=1, then parse.
         trace_body("upstream response", &resp_bytes);

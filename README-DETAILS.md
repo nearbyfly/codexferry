@@ -128,7 +128,7 @@ upstream serves it.
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `ttl_hours` | 168 (7 days) | Idle session retention before eviction |
+| `ttl_hours` | 168 (7 days) | Idle session retention before eviction. `0` expires every session immediately — the store is effectively disabled (warns at startup). |
 | `max_sessions` | 256 | Max cached sessions (LRU when exceeded) |
 | `max_memory_mb` | 512 | Memory budget (LRU eviction when exceeded) |
 

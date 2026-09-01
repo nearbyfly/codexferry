@@ -7,7 +7,8 @@ request paths (session store, both proxy handlers, SSE parser, hot-reload
 watcher) and a parallel sweep of the periphery (catalog, models_cache,
 metrics, convert, normalize, config validation).
 **Status:** §1 (Thread / Concurrency, C1–C4) fixed 2026-09-01;
-§2 (Performance, P1–P4) fixed 2026-09-01; §3 open.
+§2 (Performance, P1–P4) fixed 2026-09-01;
+§3 (Edge Cases, E1–E6) fixed 2026-09-01. All findings closed.
 
 Overall: the architecture is clean, degradation paths are well covered, and
 the docs/code sync is unusually good. The hot-reload channel+applier design,
@@ -155,7 +156,7 @@ single serialization inside `send_upstream` was considered and rejected:
 it does not reduce the traversal count, since the surgery needs the Value
 form either way.)
 
-## 3. Edge Cases
+## 3. Edge Cases — FIXED 2026-09-01
 
 ### E1 (medium-high) — axum's default 2 MB body limit is not raised; long codex sessions will 413
 
@@ -165,7 +166,9 @@ inline every turn** (AGENTS.md §6). A long session with large tool outputs
 crosses 2 MB → the daemon answers 413 and that session is unusable here, with
 no degradation path. Local proxy, so the risk calculus is simple.
 
-**Fix:** one line — `DefaultBodyLimit::max(N)` in `build_router`.
+**Fix (applied):** `build_router` now applies
+`DefaultBodyLimit::max(MAX_TRANSFER_BYTES)` (64 MiB). The same constant
+caps the E6 response reads.
 
 ### E2 (medium) — `/models` cache fingerprint omits `route.description`; description-only edits serve stale catalogs forever
 
@@ -180,7 +183,9 @@ false` (defaults), the stale description is served **indefinitely** —
 violating the documented "config change becomes visible after refresh"
 contract (AGENTS.md §12).
 
-**Fix:** fold `route.description` into `fingerprint_config`.
+**Fix (applied):** `fingerprint_config` hashes
+`route.description` per route; a regression test pins that a
+description-only edit changes the fingerprint.
 
 ### E3 (medium) — a function_call with an empty `name` is emitted and persisted, poisoning session replay
 
@@ -193,8 +198,12 @@ replays it as `tool_calls[].function.name: ""`, which strict Chat upstreams
 reject — the same failure family as the documented empty-`call_id` case
 (§8b).
 
-**Fix:** apply the same drop rule to empty-name entries at finish (or at
-minimum drop them from `acc.items` so they never replay).
+**Fix (applied):** the finish filter now drops ANY entry without a name
+(`!name.is_empty()`), replacing the old neither-nor-args rule. Since all
+tool-call emission happens at stream end, a dropped entry is never seen by
+the client at all. Name-only entries (a zero-argument call) are still
+emitted. Fixture: args-only dropped + name-only kept; AGENTS.md §8 wording
+updated.
 
 ### E4 (low-medium) — `total_tokens` computed as plain `u32 + u32`; overflow on upstream-controlled values
 
@@ -203,7 +212,8 @@ minimum drop them from `acc.items` so they never replay).
 and silently wrap to a negative-looking total in release, written into
 `response.completed` which codex consumes.
 
-**Fix:** `u64::from(a) + u64::from(b)`.
+**Fix (applied):** both sites compute
+`u64::from(input) + u64::from(output)`; a fixture pins 3e9 + 2e9 → 5e9.
 
 ### E5 (low) — `ttl_hours = 0` silently disables the session store
 
@@ -212,7 +222,8 @@ cutoff is `now` and every session expires in the gap between `save` and the
 next turn's `get` — the store is permanently miss with no warning. The docs
 only describe the zero semantics of `max_sessions` / `max_memory_mb`.
 
-**Fix:** WARN at validate time, or document the zero semantics.
+**Fix (applied):** `validate()` emits a loud WARN for `ttl_hours = 0`,
+and the README-DETAILS `[session]` table documents the semantics.
 
 ### E6 (low) — non-streaming upstream body reads have no size cap
 
@@ -220,6 +231,15 @@ only describe the zero semantics of `max_sessions` / `max_memory_mb`.
 is bounded only by the total timeout, not by size — a broken/malicious
 upstream can push unbounded bytes within `timeout_ms`. Low risk in the local
 trust model; noting for completeness.
+
+**Fix (applied):** a shared `read_body_capped` helper walks the chunks of
+non-streaming upstream responses and fails with a 502 (recorded as
+`Network`) once the running buffered length crosses `MAX_TRANSFER_BYTES`
+(64 MiB, the same constant as E1); used by both the chat and passthrough
+non-streaming paths. The non-2xx error-body read (`upstream_non_2xx`)
+keeps its timeout bound and is unchanged — capping it would silently
+truncate the error body the client receives. Fixtures: under-cap read,
+over-cap 502.
 
 ---
 
