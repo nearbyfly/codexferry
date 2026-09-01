@@ -24,6 +24,13 @@ ensure_tool() {
   fi
 }
 
+# The e2e-mock binary is scaffolding, not a coverage target (spec §Design
+# Part 3): it never flushes counters (SIGTERM default-kill, no handler), so
+# in the integration/e2e reports it is a permanent 0%-coverage row whose 199
+# uncovered lines pollute the totals. Filter it out of every report that
+# would otherwise list it.
+MOCK_EXCLUDE='src/bin/e2e-mock\.rs'
+
 mode="${1:-}"
 case "$mode" in
   unit)
@@ -40,6 +47,7 @@ case "$mode" in
     cargo llvm-cov clean --workspace
     cargo llvm-cov --test chat_conversion --test endpoints_metrics \
                    --test healing --test passthrough --test sessions \
+                   --ignore-filename-regex "$MOCK_EXCLUDE" \
                    --html --output-dir coverage/integration
     echo "HTML report: coverage/integration/html/index.html"
     ;;
@@ -83,7 +91,8 @@ case "$mode" in
       export LLVM_PROFILE_FILE="$PWD/target/e2e-%p-%m.profraw"
       ./scripts/e2e.sh all
     )
-    cargo llvm-cov report --html --output-dir coverage/e2e
+    cargo llvm-cov report --ignore-filename-regex "$MOCK_EXCLUDE" \
+                          --html --output-dir coverage/e2e
     echo "HTML report: coverage/e2e/html/index.html"
     ;;
   ""|-h|--help|help)
@@ -96,8 +105,8 @@ usage: scripts/coverage.sh [unit|integration|e2e]
                RouterGuard teardown so its counters flush)
   e2e          scripts/e2e.sh all with instrumented binaries, merged report
 
-Reports land in coverage/<mode>/html/index.html (gitignored). Use
-cargo llvm-cov --summary-only ... directly for a terminal-only view.
+Reports land in coverage/<mode>/html/index.html (gitignored). For a
+terminal-only summary after a run: cargo llvm-cov report --summary-only
 One-time setup:
   rustup component add llvm-tools-preview
   cargo install cargo-llvm-cov --locked
