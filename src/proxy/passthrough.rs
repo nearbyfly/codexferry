@@ -170,9 +170,14 @@ pub(super) async fn handle_responses_format(
             // as a timeout and a terminal failure event is appended.
             let mut timed_out = false;
             let mut content_carry: Vec<u8> = Vec::new();
-            if !heal.dsml && !heal.think {
-                // Fast path: both healing gates off — verbatim byte relay
-                // (today's behavior, zero added parsing).
+            if !heal.dsml && !heal.think && !heal.merge_fragmented {
+                // Fast path: all three healing gates off — verbatim byte
+                // relay (zero added parsing). The merger must NOT be
+                // silently bypassed when content healers are off but
+                // `merge_fragmented` is on (its default); the gates are
+                // independent per the spec's D-1 orthogonality rule
+                // (merger handles item-shape; healers handle content).
+                // See review finding #1 on PR #7.
                 loop {
                     let timed = tokio::time::timeout(idle_timeout, stream.next()).await;
                     let chunk_result = match timed {
