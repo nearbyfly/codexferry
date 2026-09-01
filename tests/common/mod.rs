@@ -848,9 +848,7 @@ impl Drop for RouterGuard {
     fn drop(&mut self) {
         #[cfg(unix)]
         {
-            unsafe {
-                libc::kill(self.child.id() as libc::pid_t, libc::SIGTERM);
-            }
+            let _ = unsafe { libc::kill(self.child.id() as libc::pid_t, libc::SIGTERM) };
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
             while self.child.try_wait().ok().flatten().is_none() {
                 if std::time::Instant::now() >= deadline {

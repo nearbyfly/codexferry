@@ -240,10 +240,15 @@ async fn unknown_model_returns_400() {
     assert!(env.mock_state.received_requests.lock().await.is_empty());
 }
 
-/// Coverage-infra spec Task 1 pin: RouterGuard::drop must terminate the
-/// child promptly (SIGTERM graceful path, NOT an unbounded wait) and reap
-/// the zombie. A regression to an unbounded wait hangs the whole suite
-/// here; a non-reaping drop leaks zombies.
+/// Coverage-infra spec Task 1 pin: `RouterGuard::drop` must terminate the
+/// child promptly (no hang) — a regression to an unbounded wait would hang
+/// the whole suite right here. What is asserted is exactly that prompt
+/// drop, nothing more: the SIGTERM-vs-SIGKILL signal distinction is not
+/// observable (a bare-SIGKILL regression also passes in <3s), and the reap
+/// is performed by the guard's own `wait()` inside drop, which this test
+/// cannot inspect. The `sleep 5` child and the `kill(2)` teardown are
+/// unix-only, so the test is gated like the libc dev-dependency.
+#[cfg(unix)]
 #[test]
 fn router_guard_drop_terminates_and_reaps_promptly() {
     let dir = tempfile::tempdir().unwrap();
