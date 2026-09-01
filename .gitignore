@@ -9,3 +9,8 @@
 /cxf.toml
 /config.toml
 coverage/
+# Raw LLVM coverage-counter files. coverage.sh confines them to target/ or
+# coverage/, but a plain `cargo test` that reuses leftover instrumented
+# binaries (after an e2e coverage run) sprays default_*.profraw into the
+# repo root. They are per-process scratch, never meaningful to commit.
+*.profraw
