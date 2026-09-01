@@ -28,3 +28,9 @@ tempfile = "3"
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+
+# Test-teardown only: RouterGuard::drop sends SIGTERM (graceful, so the
+# router's LLVM coverage counters flush at exit) and escalates to SIGKILL
+# on a bounded timeout (coverage-infra spec §Design Part 1).
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"

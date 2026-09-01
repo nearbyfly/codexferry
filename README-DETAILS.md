@@ -565,6 +565,41 @@ cargo test doctor
 cargo run -- doctor --live --config cxf.toml
 ```
 
+### Test coverage
+
+Coverage runs on `cargo-llvm-cov` (source-based, accurate for Rust). One-time
+setup:
+
+```bash
+rustup component add llvm-tools-preview
+cargo install cargo-llvm-cov --locked
+```
+
+`scripts/coverage.sh` wraps the three layers — each writes an HTML report
+under `coverage/<mode>/html/` (gitignored; cargo-llvm-cov appends the
+`html/` subdir itself):
+
+```bash
+scripts/coverage.sh unit         # unit tests (inside the bin crate)
+scripts/coverage.sh integration  # the five integration suites
+scripts/coverage.sh e2e          # deterministic e2e, instrumented binaries
+```
+
+How to read the numbers (and what not to do with them):
+
+- **Per-layer reports are the useful ones.** The integration layer spawns the
+  router as a subprocess; its teardown is deliberately graceful (SIGTERM →
+  bounded wait → SIGKILL fallback, mirroring the systemd stop path) so the
+  router's LLVM counters flush at exit — a bare SIGKILL would report the
+  handlers at ~0%. The e2e layer relies on the same fact (`e2e-lib.sh` tears
+  down with SIGTERM).
+- **Coverage is a gap-finder, not a gate.** There is no absolute-number
+  threshold; the actionable signal in review is whether the lines a change
+  touched got exercised (patch coverage). Semantic gaps — a leak that only
+  manifests with a specific upstream dialect — are invisible to line coverage.
+- The e2e-mock binary is scaffolding; its (unflushed) coverage is excluded
+  from the target set by intent.
+
 ### End-to-End scripts
 
 - `scripts/e2e.sh [basic|models|static|tools|multiturn|cross_format_switch|stale_catalog|doctor_dynamic|doctor_pinned|doctor_fallback|all]` — deterministic layer:

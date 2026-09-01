@@ -36,6 +36,7 @@ selector binds to a single provider — you cannot switch providers mid-session.
 | **uuid** | 1 (v4) | Response ID generation (`resp_<uuid_v4_simple>`) |
 | **tokio-stream** | 0.1 | `ReceiverStream` wrapper for mpsc → Stream |
 | **tempfile** (dev) | 3 | Temp dirs/files in tests |
+| **libc** (dev, unix) | 0.2 | `kill(2)` + signal constants for the test harness's graceful SIGTERM teardown (test-only) |
 
 **Rust edition:** 2021
 **Toolchain:** stable (tested on 1.97.1)
@@ -332,6 +333,7 @@ codexferry/
 │   ├── e2e-lib.sh           # E2E shared helpers: sandbox selection + run_codex + doctor assertions (336)
 │   ├── e2e.sh               # deterministic E2E layer: basic/models/tools/multiturn + doctor scenarios (443)
 │   ├── e2e-real.sh          # opt-in real-provider smoke; refuses sandbox bypass (140)
+│   ├── coverage.sh          # cargo-llvm-cov wrappers: unit/integration/e2e coverage flows (119)
 │   ├── codex-config-dynamic.toml.example  # Codex CLI side: live /models catalog via auth.command (47)
 │   └── codex-config-static.toml.example   # Codex CLI side: pinned gen-catalog file (34)
 ├── docs/superpowers/
@@ -387,17 +389,17 @@ codexferry/
 │       │   ├── stream_tests.rs  # stream conversion unit tests (1,125)
 │       │   └── tests.rs   # response conversion unit tests (217)
 └── tests/
-    ├── common/mod.rs         # shared harness (1,272)
+    ├── common/mod.rs         # shared harness (1,295)
     ├── chat_conversion.rs    # chat-path conversion tests (691)
     ├── passthrough.rs        # responses-format relay tests (incl. fragmented-run merger scenarios) (669)
     ├── healing.rs            # dsml/think leak healing tests (352)
     ├── sessions.rs           # cross-turn session tests (197)
-    └── endpoints_metrics.rs  # healthz, models, metrics, doctor tests (994)
+    └── endpoints_metrics.rs  # healthz, models, metrics, doctor tests (1,237)
 ```
 
 > Line counts are approximate and include comments; they drift as the code evolves.
 > Update them when making significant changes.
 
-~25,506 lines total across the scripts/, src/ and tests/ files above. 470 tests
-(425 unit + 5 e2e-mock unit + 40 integration passing + 1 ignored live-probe
+~28,468 lines total across the scripts/, src/ and tests/ files above. 499 tests
+(448 unit + 5 e2e-mock unit + 46 integration passing + 1 ignored live-probe
 test).
