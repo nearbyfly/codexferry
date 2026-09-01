@@ -9,7 +9,7 @@ Each release's section is drafted with `scripts/release.sh vX.Y.Z
 --prep-changelog`, curated by hand, and committed to `main` **before** the
 release is cut, so both remotes receive it through the normal push flow.
 
-## [v0.1.4] — Unreleased
+## [v0.1.4] — 2026-09-01
 
 **`merge_fragmented` heal pass for upstream Responses SSE fragmentation.**
 
@@ -87,6 +87,20 @@ release is cut, so both remotes receive it through the normal push flow.
   `extra_params`, the outbound request body is serialized directly from the
   typed request — no intermediate `serde_json::Value` tree of the
   (potentially transcript-sized) body.
+
+### Docs & tests
+
+- **Coverage measurement**: new `scripts/coverage.sh unit|integration|e2e`
+  wraps cargo-llvm-cov per test layer (HTML reports under `coverage/<mode>/`;
+  see README-DETAILS "Test coverage"). Built on the integration harness now
+  stopping the router subprocess the way production does — SIGTERM into the
+  graceful-shutdown path, SIGKILL only as a bounded fallback — instead of a
+  bare SIGKILL, which lost the subprocess's LLVM counters and would report
+  the handlers at ~0%.
+- **Models TDD audit**: closed the coverage gaps found in the PR #7–#12
+  review sweep of the models cache and catalog.
+- **README slimmed to quick-start shape**; the deep config/endpoint
+  reference moved to README-DETAILS.md.
 
 ### Spec
 
