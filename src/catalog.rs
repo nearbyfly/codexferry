@@ -67,7 +67,12 @@ pub fn generate_catalog(
 /// `doctor --live`, which synthesizes entries for its temporary probe
 /// routes. Its only callers are those two production paths plus the unit
 /// tests that pin the from-scratch shape.
-pub fn build_catalog_entry(route_key: &str, context_window: u64, effort: Option<&str>) -> Value {
+pub fn build_catalog_entry(
+    route_key: &str,
+    provider_format: &str,
+    context_window: u64,
+    effort: Option<&str>,
+) -> Value {
     let mut obj = Map::new();
     // From-scratch path: pin the neutral base_instructions placeholder
     // (codex >= 0.147 rejects entries carrying neither base_instructions nor
@@ -80,6 +85,7 @@ pub fn build_catalog_entry(route_key: &str, context_window: u64, effort: Option<
     set_catalog_fields(
         &mut obj,
         route_key,
+        provider_format,
         context_window,
         effort,
         /* description */ None,
@@ -132,6 +138,7 @@ pub fn build_catalog_value(
         set_catalog_fields(
             &mut seed,
             route_key,
+            &route.provider.format,
             route.context_window,
             route.default_reasoning_effort.as_deref(),
             route.description.as_deref(),
@@ -247,6 +254,7 @@ fn filter_template_entry(entry: &mut Map<String, Value>) -> Vec<String> {
 fn set_catalog_fields(
     obj: &mut Map<String, Value>,
     route_key: &str,
+    provider_format: &str,
     context_window: u64,
     default_reasoning_effort: Option<&str>,
     description: Option<&str>,
@@ -279,9 +287,13 @@ fn set_catalog_fields(
     // 2026-08-17 DSML leak was exactly this class of inheritance).
     obj.insert("shell_type".into(), json!("default"));
     obj.insert("supports_parallel_tool_calls".into(), json!(true));
+    // Description: name the upstream wire format ("chat" / "responses")
+    // so the picker line shows which interface the route sits on — the
+    // passthrough and the converting path behave differently, and the
+    // distinction is otherwise invisible (user request 2026-09-01).
     let description_value = match description {
-        Some(desc) => format!("CodexFerry route {route_key} - {desc}"),
-        None => format!("CodexFerry route {route_key}"),
+        Some(desc) => format!("CodexFerry {provider_format} to {route_key} - {desc}"),
+        None => format!("CodexFerry {provider_format} to {route_key}"),
     };
     obj.insert("description".into(), json!(description_value));
     // Required-by-Codex structural fields. Codex >= 0.147 deserializes the
@@ -899,13 +911,13 @@ format = "chat"
     }
 
     #[test]
-    fn description_fallback_uses_codexferry_route() {
+    fn description_fallback_names_the_wire_format() {
         let dir = tempfile::tempdir().unwrap();
         let generated = gen_with(dir.path(), None);
         let entry = &generated.catalog["models"][0];
         assert_eq!(
-            entry["description"], "CodexFerry route x/model-a",
-            "fallback description must use the CodexFerry brand"
+            entry["description"], "CodexFerry chat to x/model-a",
+            "fallback description must name the wire format and the route"
         );
     }
 
@@ -915,8 +927,8 @@ format = "chat"
         let generated = gen_with_desc(dir.path(), None);
         let entry = &generated.catalog["models"][0];
         assert_eq!(
-            entry["description"], "CodexFerry route x/model-a - fast coding model",
-            "custom description must be appended after the route key with a dash separator"
+            entry["description"], "CodexFerry chat to x/model-a - fast coding model",
+            "custom description must be appended after the wire format + route with a dash separator"
         );
     }
 
@@ -982,7 +994,7 @@ format = "chat"
         assert_eq!(entry["shell_type"], "default");
         assert_eq!(entry["supports_parallel_tool_calls"], true);
         assert_eq!(entry["prefer_websockets"], false);
-        assert_eq!(entry["description"], "CodexFerry route x/model-a");
+        assert_eq!(entry["description"], "CodexFerry chat to x/model-a");
         assert_eq!(entry["slug"], "x/model-a");
         assert_eq!(entry["context_window"], 131072);
         // Required-by-codex structural fields are pinned to neutral values

@@ -168,14 +168,14 @@ async fn probe_both_routes(mode: Mode) -> anyhow::Result<Vec<Check>> {
     // probe asserts the WIRE SHAPE (tools, item types, model rewrite,
     // round-trip), not the instruction content.
     let catalog = json!({ "models": [
-        crate::catalog::build_catalog_entry("doctor/resp", 131072, Some("low")),
+        crate::catalog::build_catalog_entry("doctor/resp", "responses", 131072, Some("low")),
     // TODO(issue #3 item 5): free_port() has a TOCTOU race; wrap startup in a
     // retry loop (see tests/integration.rs setup() for the pattern).
     // TODO(issue #3 item 6): pick_tool should prefer exec_command; the first
     // function tool with a synthesizable required property might be something
     // else (e.g. apply_patch), causing the probe to synthesize an unusable call.
 
-        crate::catalog::build_catalog_entry("doctorchat/chat", 131072, Some("low")),
+        crate::catalog::build_catalog_entry("doctorchat/chat", "chat", 131072, Some("low")),
     ]});
     let catalog_path = dir.path().join("catalog.json");
     std::fs::write(&catalog_path, serde_json::to_string_pretty(&catalog)?)?;

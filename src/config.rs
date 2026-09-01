@@ -185,7 +185,7 @@ pub struct RouteConfig {
     #[serde(default)]
     pub default_reasoning_effort: Option<String>,
     /// Optional human-readable description appended to the generated model
-    /// catalog entry's description (after "CodexFerry route {key}"),
+    /// catalog entry's description (after "CodexFerry {format} to {key}"),
     /// visible in the Codex `/model` picker as the model's subtitle.
     #[serde(default)]
     pub description: Option<String>,

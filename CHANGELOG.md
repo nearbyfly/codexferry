@@ -35,6 +35,15 @@ release is cut, so both remotes receive it through the normal push flow.
   Hot-reloadable. Responses-format path only — chat-format path is
   naturally unfragmented.
 
+### Changed
+
+- **Model-picker descriptions name the upstream wire format**: catalog
+  entries now describe a route as `CodexFerry chat to <key>` or
+  `CodexFerry responses to <key>` (plus the optional configured
+  description), so the picker shows which interface — converting or
+  passthrough — a model sits on. Regenerate the pinned catalog or let the
+  live endpoint refresh to see the new wording.
+
 ### Fixed
 
 - **Long codex sessions rejected with 413**: the daemon now accepts request
