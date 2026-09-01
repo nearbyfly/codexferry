@@ -146,22 +146,37 @@ impl CatalogCache {
     }
 
     /// Fast-path check: cached entry fresh under this fingerprint and the
-    /// template-mtime / recheck conditions. Pure memory, std-Mutex only.
+    /// template-mtime / recheck conditions.
+    ///
+    /// The template stat runs OUTSIDE the lock: the snapshot (small fields +
+    /// body refcount) is taken under `inner`, the lock dropped, then the
+    /// mtime fetched. The stat targets the codex template path, which can
+    /// sit on a slow or hung mount; blocking while holding `inner` would
+    /// stall every other `/models` request, including fresh hits. If a
+    /// refresh replaces the entry after the snapshot, returning the
+    /// snapshot's body is exactly the documented one-request-stale SWR
+    /// tolerance.
     fn fast_hit(&self, fingerprint: u64) -> Option<(String, Bytes)> {
-        let inner = self.inner.lock().unwrap();
-        inner.as_ref().and_then(|cached| {
-            let template_mtime = cached.template_path.as_ref().and_then(file_mtime);
+        let (etag, body, entry_fingerprint, template_path, cached_mtime, recheck_due) = {
+            let inner = self.inner.lock().unwrap();
+            let cached = inner.as_ref()?;
             let recheck_due = cached.checked_at.elapsed() >= TEMPLATE_RECHECK_INTERVAL
                 && (cached.template_path.is_none() || cached.hide_bundled);
-            if cached.fingerprint == fingerprint
-                && cached.template_mtime == template_mtime
-                && !recheck_due
-            {
-                Some((cached.etag.clone(), cached.body.clone()))
-            } else {
-                None
-            }
-        })
+            (
+                cached.etag.clone(),
+                cached.body.clone(),
+                cached.fingerprint,
+                cached.template_path.clone(),
+                cached.template_mtime,
+                recheck_due,
+            )
+        };
+        let template_mtime = template_path.as_ref().and_then(file_mtime);
+        if entry_fingerprint == fingerprint && cached_mtime == template_mtime && !recheck_due {
+            Some((etag, body))
+        } else {
+            None
+        }
     }
 
     /// The cached entry as `(etag, body)`, if one exists.
@@ -579,10 +594,16 @@ context_window = 1000
         for j in joins {
             let _ = j.await.unwrap();
         }
-        assert_eq!(
-            CALLS.load(std::sync::atomic::Ordering::SeqCst),
-            2,
-            "exactly one background refresh may run (1 cold + 1 refresh)"
+        // Upper bound only: whether the single-flight winner's blocking
+        // discovery closure has STARTED by this point is blocking-pool
+        // scheduling timing, not something the joined gets await on. The
+        // gate is still closed here, so a second refresh cannot have begun;
+        // the exact `== 2` check below runs after the deterministic
+        // refreshing-lock barrier.
+        assert!(
+            CALLS.load(std::sync::atomic::Ordering::SeqCst) <= 2,
+            "at most one background refresh may start (1 cold + 1 refresh); \
+             single-flight must not run one per concurrent get"
         );
         GATE.store(true, std::sync::atomic::Ordering::SeqCst);
         tokio::time::sleep(Duration::from_millis(100)).await;

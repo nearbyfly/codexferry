@@ -534,6 +534,22 @@ pub fn resolve_api_key(provider: &ProviderConfig) -> Result<String, String> {
     Err("no API key configured".into())
 }
 
+/// Async variant of [`resolve_api_key`] for the request path: the
+/// `api_key_file` source performs a blocking `fs::read_to_string`, which
+/// must not run on a tokio worker (a slow or hung filesystem — e.g. a stale
+/// autofs/NFS mount — would stall the runtime). It is parked on the blocking
+/// pool; the inline/env sources are cheap and stay synchronous.
+pub async fn resolve_api_key_async(provider: &ProviderConfig) -> Result<String, String> {
+    if provider.api_key_file.is_some() {
+        let provider = provider.clone();
+        tokio::task::spawn_blocking(move || resolve_api_key(&provider))
+            .await
+            .unwrap_or_else(|e| Err(format!("api key resolution task failed: {e}")))
+    } else {
+        resolve_api_key(provider)
+    }
+}
+
 /// Build the upstream URL for a chat completions request.
 ///
 /// Appends `/chat/completions` to the provider `base_url`, trimming any

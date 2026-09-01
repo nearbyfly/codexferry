@@ -42,7 +42,7 @@ use crate::convert::request::to_chat_request_with_ns_map;
 use crate::convert::response::{build_completed_response, chat_response_to_items, StreamConverter};
 use crate::logging;
 use crate::session::SessionStore;
-use crate::upstream::{chat_url, is_done, parse_sse_stream, resolve_api_key, responses_url};
+use crate::upstream::{chat_url, is_done, parse_sse_stream, resolve_api_key_async, responses_url};
 use crate::wire::chat::{ChatResponse, ChatStreamChunk};
 use crate::wire::responses::ResponsesRequest;
 mod capture;
@@ -678,11 +678,15 @@ async fn handle_responses(State(state): State<Arc<AppState>>, body: axum::body::
 
     let model_key = req.model.clone();
 
-    // Look up the route by model key; both the route and any merged session
-    // history are fetched under one config read lock.
-    let (route, history) = {
+    // Look up the route by model key under a short config read guard. The
+    // guard is dropped BEFORE the session lookup below: `sessions.get` takes
+    // the session store's own write lock and deep-clones the full history,
+    // and holding the config read lock across that await would stretch the
+    // hold while a queued hot-reload write blocks new readers (tokio RwLock
+    // is write-preferring).
+    let route = {
         let config = state.config.read().await;
-        let route = match config.routes.get(&model_key) {
+        match config.routes.get(&model_key) {
             Some(r) => r.clone(),
             None => {
                 let status = StatusCode::BAD_REQUEST;
@@ -703,23 +707,23 @@ async fn handle_responses(State(state): State<Arc<AppState>>, body: axum::body::
                 );
                 return resp;
             }
-        };
+        }
+    };
 
-        // Merge stored history from previous_response_id (spec §8.3): a hit
-        // prepends the prior conversation, a miss (expired/evicted/restart)
-        // degrades gracefully to an empty history.
-        let history = if let Some(prev_id) = &req.previous_response_id {
-            state.sessions.get(prev_id).await.unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-
-        (route, history)
+    // Merge stored history from previous_response_id (spec §8.3): a hit
+    // prepends the prior conversation, a miss (expired/evicted/restart)
+    // degrades gracefully to an empty history. Runs outside the config
+    // guard — see the comment above.
+    let history = if let Some(prev_id) = &req.previous_response_id {
+        state.sessions.get(prev_id).await.unwrap_or_default()
+    } else {
+        Vec::new()
     };
 
     // Resolve the provider's API key (api_key → env → file); a failure here
-    // is a server-side configuration problem, so return 500.
-    let api_key = match resolve_api_key(&route.provider) {
+    // is a server-side configuration problem, so return 500. The file source
+    // is read on the blocking pool (see `resolve_api_key_async`).
+    let api_key = match resolve_api_key_async(&route.provider).await {
         Ok(k) => k,
         Err(e) => {
             let status = StatusCode::INTERNAL_SERVER_ERROR;
