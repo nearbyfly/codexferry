@@ -47,6 +47,13 @@ struct RunState {
     start_idx: usize,
     start_id: String,
     call_id: Option<String>,
+    /// Function name captured from the first fragment of a function_call
+    /// run (item_type == FunctionCall). The synthesized `output_item.done`
+    /// and the rewritten `response.completed.output` array both use this
+    /// so the client and the session store see a canonical tool name
+    /// instead of the upstream's fragmented copies. `None` for non-
+    /// function_call runs.
+    start_name: Option<String>,
     /// Accumulated message text (set when item_type == Message).
     /// Empty for non-message runs (spec §R2 + Q2).
     merged_text: String,
@@ -119,7 +126,7 @@ impl FragmentedItemMerger {
                 | "response.content_part.done"
                 | "response.output_item.done",
             ) => self.on_done(raw),
-            Some("response.completed") => self.on_completed(raw),
+            Some("response.completed") => self.on_completed(raw, data),
             _ => vec![Bytes::copy_from_slice(raw)],
         }
     }
@@ -164,6 +171,11 @@ impl FragmentedItemMerger {
             .and_then(|i| i.get("call_id"))
             .and_then(Value::as_str)
             .map(str::to_string);
+        let new_name = v
+            .get("item")
+            .and_then(|i| i.get("name"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
 
         match self.run.as_ref() {
             None => {
@@ -175,6 +187,7 @@ impl FragmentedItemMerger {
                     start_idx: new_idx,
                     start_id: new_id,
                     call_id: new_call_id,
+                    start_name: new_name,
                     merged_text: String::new(),
                     merged_reasoning: String::new(),
                     merged_arguments: String::new(),
@@ -224,6 +237,7 @@ impl FragmentedItemMerger {
                         start_idx: new_idx,
                         start_id: new_id,
                         call_id: new_call_id,
+                        start_name: new_name,
                         merged_text: String::new(),
                         merged_reasoning: String::new(),
                         merged_arguments: String::new(),
@@ -335,10 +349,20 @@ impl FragmentedItemMerger {
     }
 
     /// Flush any active run's synthesized done, then forward the
-    /// upstream's own `response.completed` verbatim. Same per-type
-    /// gate as the type-switch flush in `on_added`.
-    fn on_completed(&mut self, raw: &[u8]) -> Vec<Bytes> {
+    /// upstream's own `response.completed` with `response.output`
+    /// rewritten to contain only the merged item (when a merge
+    /// happened). Same per-type gate as the type-switch flush in
+    /// `on_added`.
+    ///
+    /// `data` is the upstream `response.completed` JSON payload
+    /// (already parsed by `push_event`'s dispatcher via the `data`
+    /// arg); we re-parse it here so we can splice in the merged
+    /// item. If parsing fails or no merge happened, the upstream
+    /// payload is forwarded byte-for-byte (γ-1 fallback: never
+    /// silently drop the closing event).
+    fn on_completed(&mut self, raw: &[u8], data: &str) -> Vec<Bytes> {
         let mut out = Vec::new();
+        let mut merged_item: Option<Value> = None;
         if let Some(run) = self.run.take() {
             let should_flush = match run.item_type {
                 ItemType::Message => !run.merged_text.is_empty(),
@@ -346,23 +370,70 @@ impl FragmentedItemMerger {
                 ItemType::FunctionCall => !run.merged_arguments.is_empty(),
             };
             if should_flush {
+                merged_item = Some(self.synthesize_merged_item_value(&run));
                 out.extend(self.flush_run_synthesis(run));
             }
         }
+        if let Some(merged) = merged_item {
+            // Splice the merged item into response.output so the
+            // session store (last_completed_payload → completed_capture)
+            // sees the merged shape, not the upstream's fragmented one.
+            // Spec §"Session capture interaction": the stored output
+            // array must reflect what the client received.
+            if let Ok(mut v) = serde_json::from_str::<Value>(data) {
+                if let Some(response) = v.get_mut("response").and_then(Value::as_object_mut)
+                {
+                    response.insert("output".to_string(), Value::Array(vec![merged]));
+                }
+                out.push(sse_block("response.completed", &v));
+                return out;
+            }
+            // Parse failure: forward upstream raw rather than dropping.
+        }
         out.push(Bytes::copy_from_slice(raw));
         out
+    }
+
+    /// Build the JSON `Value` of the merged item in the canonical
+    /// Responses item shape — used by `flush_run_synthesis` (the
+    /// `item` field of the synthesized `output_item.done`) and by
+    /// `on_completed` (each element of the rewritten
+    /// `response.output`). Keeping both call sites on the same
+    /// helper guarantees the streaming close and the final
+    /// completed payload never disagree (review finding #2).
+    fn synthesize_merged_item_value(&self, run: &RunState) -> Value {
+        match run.item_type {
+            ItemType::Message => json!({
+                "type": "message",
+                "id": run.start_id,
+                "role": "assistant",
+                "status": "completed",
+                "content": [{ "type": "output_text", "text": run.merged_text }]
+            }),
+            ItemType::Reasoning => json!({
+                "type": "reasoning",
+                "id": run.start_id,
+                "summary": [{ "type": "summary_text", "text": run.merged_reasoning }]
+            }),
+            ItemType::FunctionCall => json!({
+                "type": "function_call",
+                "id": run.start_id,
+                "call_id": run.call_id.clone().unwrap_or_default(),
+                "name": run.start_name.clone().unwrap_or_else(|| "<merged>".to_string()),
+                "arguments": run.merged_arguments,
+                "status": "completed"
+            }),
+        }
     }
 
     /// Synthesize the run's flush bytes: `content_part.done` (messages
     /// only) + `output_item.done` for message / reasoning / function_call
     /// based on the accumulated merged_* fields. Spec §Event rewriting
     /// rules. Called on type switches (`on_added`) and at
-    /// `response.completed` (`on_completed`).
-    ///
-    /// Function name on the synthesized `output_item.done` for a merged
-    /// function_call is `"<merged>"` — the merger doesn't recover a
-    /// canonical name from fragments (the upstream is responsible for
-    /// the name; if it fragmented the name too, the caller is broken).
+    /// `response.completed` (`on_completed`). Delegates the per-item
+    /// shape to [`synthesize_merged_item_value`] so the streaming
+    /// close and the rewritten `response.completed.output` (see
+    /// `on_completed`) never disagree.
     fn flush_run_synthesis(&self, run: RunState) -> Vec<Bytes> {
         let mut out = Vec::new();
         match run.item_type {
@@ -411,14 +482,7 @@ impl FragmentedItemMerger {
                     &json!({
                         "type": "response.output_item.done",
                         "output_index": run.start_idx,
-                        "item": {
-                            "type": "function_call",
-                            "id": run.start_id,
-                            "call_id": run.call_id.clone().unwrap_or_default(),
-                            "name": "<merged>",
-                            "arguments": run.merged_arguments,
-                            "status": "completed"
-                        }
+                        "item": self.synthesize_merged_item_value(&run)
                     }),
                 ));
             }

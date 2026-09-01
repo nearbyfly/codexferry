@@ -592,3 +592,157 @@ fn e4_empty_item_id_tolerated() {
     let out = push_raw(&mut m, &raw);
     assert_eq!(concat(out), raw);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Task 9 (post-review): regression fixtures for the 3 bugs flagged in
+// the PR #7 review comment (id 186) — see src/heal/merge.rs doc on the
+// `flush_run_synthesis` + `on_completed` changes that motivated them.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Spec W6: when a merged message run is closed by `response.completed`,
+/// the emitted `response.completed` event's `response.output` array
+/// contains ONLY the merged item — not the original fragment items.
+/// `last_completed_payload` reads the last `response.completed` in the
+/// forwarded bytes (src/proxy/capture.rs) and uses its `output` array
+/// to populate the session store; if the upstream's fragmented array
+/// is forwarded unchanged, cross-provider replay replays the fragments.
+///
+/// Regression for review finding #2.
+#[test]
+fn w6_synthesized_response_completed_has_merged_output() {
+    let mut m = FragmentedItemMerger::new(true);
+    let msg = |id: &str| {
+        sse(
+            "response.output_item.added",
+            &format!(
+                r#"{{"type":"response.output_item.added","output_index":0,"item":{{"type":"message","id":"{id}","role":"assistant","status":"in_progress","content":[]}}}}"#
+            ),
+        )
+    };
+    let delta = |item_id: &str, text: &str| {
+        sse(
+            "response.output_text.delta",
+            &format!(
+                r#"{{"type":"response.output_text.delta","item_id":"{item_id}","output_index":0,"delta":"{text}"}}"#
+            ),
+        )
+    };
+    let _ = push_raw(&mut m, &msg("msg_0"));
+    let _ = push_raw(&mut m, &msg("msg_1")); // suppress; merge mode
+    let _ = push_raw(&mut m, &delta("msg_0", "Hello "));
+    let _ = push_raw(&mut m, &delta("msg_1", "world"));
+
+    // Upstream `response.completed` carries the fragmented output array
+    // (what MiniMax M3 actually sends in the wild).
+    let completed_data = r#"{"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"type":"message","id":"msg_0","content":[{"type":"output_text","text":"Hello "}]},{"type":"message","id":"msg_1","content":[{"type":"output_text","text":"world"}]}]}}"#;
+    let raw = sse("response.completed", completed_data);
+    let out = push_raw(&mut m, &raw);
+    let all: Vec<u8> = out.into_iter().flat_map(|b| b.to_vec()).collect();
+    let all_str = std::str::from_utf8(&all).unwrap();
+
+    // Find the LAST `response.completed` event's data payload. We slice
+    // from the byte offset AFTER the match — `match_indices` returns the
+    // matched substring itself, not what follows it.
+    let last_completed = all_str
+        .match_indices("event: response.completed\ndata: ")
+        .last()
+        .map(|(pos, m)| &all_str[pos + m.len()..])
+        .expect("response.completed must be present");
+    let last_data = last_completed
+        .split("\n\n")
+        .next()
+        .unwrap_or_default()
+        .trim();
+    let parsed: serde_json::Value =
+        serde_json::from_str(last_data).expect("completed data must be valid JSON");
+    let output = parsed
+        .get("response")
+        .and_then(|r| r.get("output"))
+        .and_then(|o| o.as_array())
+        .expect("response.output must be an array");
+
+    assert_eq!(
+        output.len(),
+        1,
+        "merged output array must contain exactly 1 item, got: {output:?}"
+    );
+    let merged_msg = &output[0];
+    assert_eq!(
+        merged_msg.get("id").and_then(|v| v.as_str()),
+        Some("msg_0"),
+        "merged item keeps first-fragment id: {merged_msg:?}"
+    );
+    let merged_text = merged_msg
+        .get("content")
+        .and_then(|c| c.get(0))
+        .and_then(|p| p.get("text"))
+        .and_then(|t| t.as_str())
+        .unwrap_or_default();
+    assert_eq!(
+        merged_text, "Hello world",
+        "merged text in completed.output: {merged_msg:?}"
+    );
+    // And the second fragment must be gone.
+    assert!(
+        !last_data.contains("\"id\":\"msg_1\""),
+        "fragment id msg_1 must not appear in the rewritten completed: {last_data}"
+    );
+}
+
+/// Spec W7: a fragmented function_call run with a stable `name` on the
+/// first fragment must preserve that name in the synthesized
+/// `output_item.done`. The previous implementation hardcoded
+/// `"name": "<merged>"` (see review finding #3); this fixture asserts
+/// the first-fragment name reaches the wire.
+///
+/// Regression for review finding #3.
+#[test]
+fn w7_synthesized_function_call_preserves_first_fragment_name() {
+    let mut m = FragmentedItemMerger::new(true);
+    // Two fragments with the same call_id and the same `name` — the
+    // merger should preserve the FIRST fragment's name.
+    let r0 = sse(
+        "response.output_item.added",
+        r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_0","call_id":"call_shared","name":"get_weather","arguments":"","status":"in_progress"}}"#,
+    );
+    let r1 = sse(
+        "response.output_item.added",
+        r#"{"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"fc_1","call_id":"call_shared","name":"get_weather","arguments":"","status":"in_progress"}}"#,
+    );
+    let _ = push_raw(&mut m, &r0);
+    let _ = push_raw(&mut m, &r1);
+    let d0 = sse(
+        "response.function_call_arguments.delta",
+        r#"{"type":"response.function_call_arguments.delta","item_id":"fc_0","output_index":0,"delta":"{\"city\":"}"#,
+    );
+    let d1 = sse(
+        "response.function_call_arguments.delta",
+        r#"{"type":"response.function_call_arguments.delta","item_id":"fc_1","output_index":0,"delta":"\"SF\"}"}"#,
+    );
+    let _ = push_raw(&mut m, &d0);
+    let _ = push_raw(&mut m, &d1);
+
+    // Type-switch to reasoning to flush the function_call run.
+    let rs = sse(
+        "response.output_item.added",
+        r#"{"type":"response.output_item.added","output_index":2,"item":{"type":"reasoning","id":"rs_0","summary":[{"type":"summary_text","text":""}]}}"#,
+    );
+    let rs_out = push_raw(&mut m, &rs);
+    let all: Vec<u8> = rs_out.into_iter().flat_map(|b| b.to_vec()).collect();
+    let all_str = std::str::from_utf8(&all).unwrap();
+
+    assert!(
+        all_str.contains(r#""name":"get_weather""#),
+        "first-fragment name 'get_weather' must be preserved in synthesis: {all_str}"
+    );
+    assert!(
+        !all_str.contains(r#""name":"<merged>""#),
+        "placeholder name '<merged>' must not appear in synthesis: {all_str}"
+    );
+    // Arguments are still merged.
+    assert!(
+        all_str.contains(r#""arguments":"{\"city\":\"SF\"}""#),
+        "merged arguments present in synthesis: {all_str}"
+    );
+}
+
