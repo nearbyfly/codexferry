@@ -2,6 +2,13 @@
 //! (module-split spec Phase 1; bodies are verbatim moves).
 use super::*;
 use serde_json::json;
+use std::sync::Mutex;
+
+/// Serializes tests that assert on the process-global unknown-type counter
+/// map. Most tests are parallel-safe via unique probe names, but the cap
+/// test FILLS the map to its limit, which would silently untrack the other
+/// tests' probes if interleaved.
+static COUNTER_TESTS: Mutex<()> = Mutex::new(());
 
 /// The shape Codex 0.147 sends: an `additional_tools` input item wrapping
 /// `namespace` entries whose inner entries are plain function tools, with
@@ -67,6 +74,7 @@ fn non_additional_items_are_ignored() {
 /// name so parallel tests never interfere.
 #[test]
 fn unknown_item_types_counted_once_per_call_and_known_ignored() {
+    let _guard = COUNTER_TESTS.lock().unwrap();
     let probe = "normalize_test_unknown_a";
     let before = unknown_type_counts().get(probe).copied().unwrap_or(0);
     let items = [
@@ -351,6 +359,7 @@ fn responses_request_dedupes_against_existing_tools() {
 
 #[test]
 fn bump_and_warn_dedupes_duplicate_types() {
+    let _guard = COUNTER_TESTS.lock().unwrap();
     // spec §4 (at most one line per type per request): duplicate
     // unmappable tool types in one call (top-level repeats) must bump
     // the counter exactly once, not once per occurrence. Unique probe
@@ -443,4 +452,37 @@ fn responses_request_warns_same_named_tool_schema_conflict() {
     normalize_responses_request(&mut obj);
     let after = unknown_type_counts().get(probe_name).copied().unwrap_or(0);
     assert_eq!(after, before + 1);
+}
+
+/// Review C4: the counter map is capped at MAX_UNKNOWN_TYPE_KEYS distinct
+/// keys — client-controlled type strings must not grow the heap without
+/// bound. Filling past the cap keeps new keys warned-but-untracked, and the
+/// map never exceeds the cap. Serialized against the snapshot tests via
+/// COUNTER_TESTS (this test changes the map's capacity semantics).
+#[test]
+fn unknown_type_counter_caps_distinct_keys() {
+    let _guard = COUNTER_TESTS.lock().unwrap();
+    let base = unknown_type_counts().len();
+    // Distinct unknown keys: the first (capacity - base) land in the map,
+    // the rest must be refused without exceeding the cap.
+    for i in 0..(MAX_UNKNOWN_TYPE_KEYS + 16) {
+        let probe = format!("cap_probe_{i}");
+        let tools = vec![json!({"type": probe})];
+        normalize_chat_tools(&tools);
+    }
+    let counts = unknown_type_counts();
+    assert!(
+        counts.len() <= MAX_UNKNOWN_TYPE_KEYS,
+        "counter map must never exceed the cap, got {}",
+        counts.len()
+    );
+    assert!(
+        counts.len() >= base,
+        "pre-existing entries must not be evicted"
+    );
+    // Restore capacity for the other counter tests: drop the cap-probe keys.
+    UNKNOWN_TYPE_COUNTS
+        .lock()
+        .unwrap()
+        .retain(|k, _| !k.starts_with("cap_probe_"));
 }

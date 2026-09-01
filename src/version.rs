@@ -181,6 +181,23 @@ impl DoctorState {
 mod tests {
     use super::*;
 
+    /// Review C4: `seen` is capped at MAX_TRACKED_VERSIONS — past the cap
+    /// a NEW version is silently absorbed (no log/metric series), while
+    /// already-seen versions stay silent as before. `current` tracking is
+    /// unaffected by the cap.
+    #[test]
+    fn observe_caps_tracked_versions() {
+        let tracker = CodexVersionTracker::new();
+        assert!(tracker.observe("1.0.1").is_some());
+        for i in 2..=MAX_TRACKED_VERSIONS {
+            assert!(tracker.observe(&format!("1.0.{i}")).is_some());
+        }
+        // At cap: a brand-new label is absorbed silently...
+        assert!(tracker.observe("9.9.9").is_none());
+        // ...and a seen label is absorbed as it always was.
+        assert!(tracker.observe("1.0.1").is_none());
+    }
+
     #[test]
     fn normalize_extracts_last_digit_token() {
         assert_eq!(
