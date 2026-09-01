@@ -342,13 +342,13 @@ codexferry/
 │   ├── main.rs             # CLI entry (clap) (175)
 │   ├── bin/
 │   │   └── e2e-mock.rs     # scripted mock upstream for the E2E scripts (379)
-│   ├── config.rs           # TOML types + validation + hot reload (1,273)
+│   ├── config.rs           # TOML types + validation + hot reload (1,297)
 │   ├── doctor.rs           # doctor: mode-aware offline quick-checks (L1 config/wiring/mode/version status + L2.6 version age, mode-keyed advisories, pinned L2.7–L2.10 pin checks, dynamic L2.7' pin-shadow WARN + L2.8'/L2.9' endpoint smoke/shape) + WARN/INFO/FAIL report/exit codes (2,495)
 │   ├── doctor_live.rs      # doctor --live: mode-aware L3 live probe (wiring mirrors the detected mode; live-catalog-fetch proof) — returns checks (1,241)
 │   ├── mode.rs             # codex wiring mode detection: pinned/dynamic/fallback (191)
 │   ├── version.rs          # codex client-version tripwire (`CodexVersionTracker`) + doctor state (394)
 │   ├── proxy/
-│   │   ├── mod.rs             # axum routing + dispatch + client-version observation (887)
+│   │   ├── mod.rs             # axum routing + dispatch + client-version observation (903)
 │   │   ├── chat.rs            # chat-format handler (519)
 │   │   ├── passthrough.rs     # responses-format relay (healed passthrough + merger wiring) (534)
 │   │   ├── upstream.rs        # send_upstream + capped body read + error-class dedup helpers (249)
@@ -370,7 +370,7 @@ codexferry/
 │   ├── session.rs          # SessionStore (397)
 │   ├── upstream.rs         # SSE parser + key resolution (parse_sse_block + parse_preserved_event) (732)
 │   ├── catalog.rs          # gen-catalog + build_catalog_value + bundled-model hide-override discovery (1,231)
-│   ├── models_cache.rs     # CatalogCache: route-fingerprint + template-mtime invalidation for live /models; and, when `hide_bundled_models` is on, re-probes `codex debug models --bundled` on the same 60s cadence (801)
+│   ├── models_cache.rs     # CatalogCache: route-fingerprint + template-mtime invalidation for live /models; and, when `hide_bundled_models` is on, re-probes `codex debug models --bundled` on the same 60s cadence (1,027)
 │   ├── logging.rs          # tracing init (36)
 │   ├── metrics.rs          # Prometheus metrics registry + /metrics encoding (407)
 │   ├── normalize.rs        # boundary normalization (hoist, namespace flatten + chat-name encode/decode map, unknown-type visibility) (476)
@@ -392,7 +392,7 @@ codexferry/
     ├── passthrough.rs        # responses-format relay tests (incl. fragmented-run merger scenarios) (669)
     ├── healing.rs            # dsml/think leak healing tests (352)
     ├── sessions.rs           # cross-turn session tests (197)
-    └── endpoints_metrics.rs  # healthz, models, metrics, doctor tests (855)
+    └── endpoints_metrics.rs  # healthz, models, metrics, doctor tests (994)
 ```
 
 > Line counts are approximate and include comments; they drift as the code evolves.

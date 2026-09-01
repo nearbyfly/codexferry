@@ -429,6 +429,145 @@ format = "chat"
 }
 
 #[tokio::test]
+/// Reload-staleness spec S3 (the 2026-09-01 incident shape): deleting a
+/// route and hot-reloading must remove its slug from the catalog for EVERY
+/// request after the reload — including the rapid bursts a restarted codex
+/// fires — because such a response gets persisted into codex's own 300s
+/// cache and would keep the removed model selectable for ~5 minutes.
+async fn models_endpoint_reflects_route_removal() {
+    let mut started = None;
+    for attempt in 0..2 {
+        let port = free_port();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        let stderr_path = dir.path().join("router.stderr.log");
+
+        let config_text = format!(
+            r#"
+[server]
+host = "127.0.0.1"
+port = {port}
+
+[providers.ds]
+base_url = "http://x"
+api_key = "k"
+format = "chat"
+
+[routes]
+"ds/keep" = {{ model = "m", context_window = 1000 }}
+"ds/doomed" = {{ model = "m", context_window = 1000 }}
+"#
+        );
+        std::fs::write(&config_path, &config_text).expect("write config");
+
+        let stderr = std::fs::File::create(&stderr_path).expect("create stderr log");
+        let bin = env!("CARGO_BIN_EXE_codexferry");
+        let codex_home = dir.path().join("codex-home");
+        std::fs::create_dir_all(&codex_home).expect("create codex-home");
+        let child = std::process::Command::new(bin)
+            .env("CODEXFERRY_CONFIG", &config_path)
+            .env("CODEX_HOME", &codex_home)
+            .stdout(Stdio::null())
+            .stderr(stderr)
+            .spawn()
+            .expect("spawn codexferry");
+
+        let guard = RouterGuard {
+            child,
+            stderr_path,
+            _dir: dir,
+        };
+        let router_url = format!("http://127.0.0.1:{port}");
+        match wait_for_healthz(&router_url, &guard).await {
+            Ok(()) => {
+                started = Some((guard, router_url, config_path, port));
+                break;
+            }
+            Err(log) => {
+                drop(guard);
+                if attempt == 1 {
+                    panic!("router did not become healthy within 10s; stderr:\n{log}");
+                }
+            }
+        }
+    }
+    let (_guard, router_url, config_path, port) =
+        started.expect("retry loop always returns or panics");
+    let client = reqwest::Client::new();
+
+    // Baseline: both slugs present.
+    let body = client
+        .get(format!("{router_url}/v1/models?client_version=0.0.0"))
+        .send()
+        .await
+        .expect("baseline models get")
+        .text()
+        .await
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let models = v["models"].as_array().expect("models array");
+    assert!(models.iter().any(|m| m["slug"] == "ds/doomed"), "{body}");
+    assert!(models.iter().any(|m| m["slug"] == "ds/keep"), "{body}");
+
+    // Delete ds/doomed: rewrite the config without it (editor-style write).
+    let removed = format!(
+        r#"
+[server]
+host = "127.0.0.1"
+port = {port}
+
+[providers.ds]
+base_url = "http://x"
+api_key = "k"
+format = "chat"
+
+[routes]
+"ds/keep" = {{ model = "m", context_window = 1000 }}
+"#
+    );
+    editor_save(&config_path, &removed);
+
+    // Poll until the slug is gone, then hammer: it must NEVER reappear (the
+    // incident had it re-persisted by a racing fetch for ~5 minutes).
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let body = client
+            .get(format!("{router_url}/v1/models?client_version=0.0.0"))
+            .send()
+            .await
+            .expect("poll models get")
+            .text()
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let models = v["models"].as_array().expect("models array");
+        if !models.iter().any(|m| m["slug"] == "ds/doomed") {
+            assert!(models.iter().any(|m| m["slug"] == "ds/keep"), "{body}");
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "removed slug still served after 10s; last body:\n{body}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    for _ in 0..20 {
+        let body = client
+            .get(format!("{router_url}/v1/models?client_version=0.0.0"))
+            .send()
+            .await
+            .expect("burst models get")
+            .text()
+            .await
+            .unwrap();
+        assert!(
+            !body.contains("ds/doomed"),
+            "removed slug reappeared in a burst response: {body}"
+        );
+    }
+}
+
+#[tokio::test]
 /// hide_bundled_models (dynamic mode): with the flag on, the catalog-shape
 /// /models response must carry `visibility: "hide"` overrides cloned from
 /// the (faked) bundled catalog so codex's slug merge hides them; with the

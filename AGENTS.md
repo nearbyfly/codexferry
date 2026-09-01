@@ -220,9 +220,14 @@ support `If-None-Match` → `304 Not Modified`.
   appends `visibility: "hide"` overrides cloned from `codex debug models
   --bundled` so Codex's dynamic-mode slug merge hides its bundled GPT models;
   see `docs/superpowers/specs/2026-08-26-hide-bundled-models-design.md`. Catalog
-  serving is stale-while-revalidate: an expired entry is served immediately
-  while a single-flight background task refreshes it, so a config change
-  becomes visible on the request AFTER the refresh completes (see
+  serving distinguishes two staleness kinds (see
+  docs/superpowers/specs/2026-09-01-models-cache-reload-staleness-design.md):
+  after a CONFIG change, reads wait for the refreshed catalog (the
+  hot-reload applier also proactively refreshes via a ReloadHook), because
+  clients like codex persist the response — serving the pre-change body
+  re-persisted a removed route for codex's full 300s cache TTL. Only
+  TIME-based staleness (60s recheck, template mtime) serves
+  stale-while-revalidate (see
   docs/superpowers/specs/2026-08-28-models-swr-design.md).
 
 ### 13. Keep the top-level MD docs in sync
