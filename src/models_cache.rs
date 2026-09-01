@@ -639,6 +639,43 @@ context_window = 1000
         );
     }
 
+    /// Reload-staleness spec §Design A: N concurrent `refresh_if_stale`
+    /// callers (rapid reload events each firing the hook) share ONE refresh
+    /// via the single-flight lock — every loser re-checks `fast_hit` after
+    /// acquiring and exits without discovering.
+    #[tokio::test]
+    async fn concurrent_refresh_if_stale_costs_one_refresh() {
+        static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        fn counting() -> Vec<Value> {
+            CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            marker_discovery()
+        }
+        let cfg = Arc::new(RwLock::new(config_with_flag("ds/a", true)));
+        let cache = Arc::new(CatalogCache {
+            inner: Mutex::new(None),
+            refreshing: Default::default(),
+            discovery: counting,
+        });
+        let _ = cache.get(&cfg).await; // cold build: CALLS == 1
+        *cfg.write().await = config_with_flag("ds/b", true);
+        let mut joins = Vec::new();
+        for _ in 0..8 {
+            let c = Arc::clone(&cache);
+            let cfg2 = Arc::clone(&cfg);
+            joins.push(tokio::spawn(async move { c.refresh_if_stale(&cfg2).await }));
+        }
+        for j in joins {
+            j.await.unwrap();
+        }
+        assert_eq!(
+            CALLS.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "1 cold + 1 shared refresh; the burst must not re-discover"
+        );
+        let fp_b = fingerprint_config(&*cfg.read().await);
+        assert!(cache.fast_hit(fp_b).is_some(), "entry synced to ds/b");
+    }
+
     /// Reload-staleness spec §Design A: `refresh_if_stale` alone (no
     /// request involved — the role the applier's ReloadHook plays) must
     /// bring the entry to the new config's fingerprint.
@@ -654,14 +691,18 @@ context_window = 1000
         *cfg.write().await = config_with_flag("ds/b", true);
         cache.refresh_if_stale(&cfg).await;
         let fp_b = fingerprint_config(&*cfg.read().await);
-        let (etag, body) = cache.get(&cfg).await;
+        // The sync is observable at the FAST-PATH level (not just via a
+        // body sniff): the entry now satisfies the new config's fingerprint
+        // through recheck and mtime conditions too.
+        assert!(
+            cache.fast_hit(fp_b).is_some(),
+            "refresh_if_stale must leave the entry fast-hit-able for the new config"
+        );
+        let (_, body) = cache.get(&cfg).await;
         assert!(
             body.windows(4).any(|w| w == b"ds/b"),
             "refresh_if_stale must have synced the entry to ds/b"
         );
-        // The get after the sync is a pure fast hit: same etag the synced
-        // entry produced, no re-discovery observable through the body.
-        let _ = etag;
     }
 
     /// Scenario matrix (spec S1–S5): the fingerprint changes exactly for

@@ -689,3 +689,58 @@ format = "chat"
     assert_eq!(body["model"], "glm-5");
     assert_eq!(body["thinking"], serde_json::json!({ "type": "enabled" }));
 }
+
+#[tokio::test]
+/// Review C3 integration pin: an `api_key_file` provider resolves through
+/// the async path (`resolve_api_key_async`, spawn_blocking) at request
+/// time. A completed turn proves the key file was read, trimmed, and the
+/// upstream call dispatched with it — a resolution failure would surface
+/// as a 500 before any upstream contact.
+async fn api_key_file_provider_resolves_end_to_end() {
+    let key_dir = tempfile::tempdir().unwrap();
+    let key_path = key_dir.path().join("filed.key");
+    // Trailing whitespace + newline: the resolver must trim.
+    std::fs::write(&key_path, "  sk-from-file\n").unwrap();
+
+    let env = setup_with_config(|mock_base_url, port| {
+        format!(
+            r#"
+[server]
+host = "127.0.0.1"
+port = {port}
+
+[providers.filed]
+base_url = "{mock_base_url}"
+api_key_file = "{}"
+format = "chat"
+
+[routes]
+"filed/chat" = {{ model = "upstream-chat-model" }}
+"#,
+            key_path.display()
+        )
+    })
+    .await;
+
+    let resp = env
+        .client
+        .post(format!("{}/v1/responses", env.router_url))
+        .json(&json!({"model": "filed/chat", "input": "hello"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "api_key_file resolution must succeed: {}",
+        resp.text().await.unwrap_or_default()
+    );
+    // The upstream saw exactly the file's trimmed content as the bearer
+    // token — the full file→trim→spawn_blocking→header chain.
+    let auth = env.mock_state.received_auth.lock().await;
+    assert_eq!(
+        auth.last().map(String::as_str),
+        Some("Bearer sk-from-file"),
+        "upstream must receive the file-resolved key: {auth:?}"
+    );
+}

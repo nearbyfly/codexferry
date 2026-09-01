@@ -241,6 +241,37 @@ async fn unknown_model_returns_400() {
 }
 
 #[tokio::test]
+/// Review E1: axum's default request-body limit is 2 MiB, and codex replays
+/// its full transcript inline every turn (`store: false`) — long sessions
+/// cross 2 MiB and were rejected with a bare 413. The raised
+/// DefaultBodyLimit (64 MiB) must let an oversized body reach route
+/// dispatch, where it fails with the normal 400 (unknown model here) — the
+/// status proves the body passed the extractor instead of being rejected.
+async fn oversized_request_body_passes_the_raised_limit() {
+    let env = setup().await;
+
+    // ~3 MiB JSON body: over axum's 2 MiB default, far under our 64 MiB cap.
+    let big = json!({
+        "model": "nope/nope",
+        "input": "a".repeat(3 * 1024 * 1024)
+    });
+    let resp = env
+        .client
+        .post(format!("{}/v1/responses", env.router_url))
+        .json(&big)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "an oversized body must reach dispatch (400), not trip the body limit (413)"
+    );
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["type"], "invalid_request_error");
+}
+
+#[tokio::test]
 /// `GET /v1/models` must list every configured route as a
 /// Responses-style model object (see the endpoint table in
 /// ARCHITECTURE.md), with `owned_by` set to the provider name. With a
@@ -318,6 +349,13 @@ format = "chat"
         // ~/.codex/models_cache.json during a reload.
         let codex_home = dir.path().join("codex-home");
         std::fs::create_dir_all(&codex_home).expect("create codex-home");
+        // Seed a fake codex models cache so the reload's invalidation step
+        // (incident chain step 1) has something to delete.
+        std::fs::write(
+            codex_home.join("models_cache.json"),
+            r#"{"fetched_at":"stale","models":[]}"#,
+        )
+        .expect("seed codex cache");
         let child = std::process::Command::new(bin)
             .env("CODEXFERRY_CONFIG", &config_path)
             .env("CODEX_HOME", &codex_home)
@@ -480,7 +518,7 @@ format = "chat"
         let router_url = format!("http://127.0.0.1:{port}");
         match wait_for_healthz(&router_url, &guard).await {
             Ok(()) => {
-                started = Some((guard, router_url, config_path, port));
+                started = Some((guard, router_url, config_path, port, codex_home));
                 break;
             }
             Err(log) => {
@@ -491,7 +529,7 @@ format = "chat"
             }
         }
     }
-    let (_guard, router_url, config_path, port) =
+    let (_guard, router_url, config_path, port, codex_home) =
         started.expect("retry loop always returns or panics");
     let client = reqwest::Client::new();
 
@@ -565,6 +603,179 @@ format = "chat"
             "removed slug reappeared in a burst response: {body}"
         );
     }
+    // The reload's invalidation step must have removed codex's seeded
+    // models_cache.json (so codex's next start re-fetches instead of
+    // trusting a pre-edit snapshot).
+    assert!(
+        !codex_home.join("models_cache.json").exists(),
+        "reload must invalidate codex's models_cache.json"
+    );
+}
+
+#[tokio::test]
+/// Reload-staleness E2 + picker-format e2e (PR #11): a description-ONLY
+/// config edit must invalidate the served catalog (the fingerprint once
+/// omitted description and a stale body was served indefinitely on the
+/// common config), and the served description must name the wire format.
+async fn models_endpoint_reflects_description_only_edit() {
+    let base_config = |desc: &str, port: u16| {
+        format!(
+            r#"
+[server]
+host = "127.0.0.1"
+port = {port}
+
+[providers.ds]
+base_url = "http://x"
+api_key = "k"
+format = "chat"
+
+[routes]
+"ds/a" = {{ model = "m", context_window = 1000, description = "{desc}" }}
+"#
+        )
+    };
+    let mut started = None;
+    for attempt in 0..2 {
+        let port = free_port();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, base_config("v1", port)).expect("write config");
+        let stderr_path = dir.path().join("router.stderr.log");
+        let stderr = std::fs::File::create(&stderr_path).expect("create stderr log");
+        let bin = env!("CARGO_BIN_EXE_codexferry");
+        let codex_home = dir.path().join("codex-home");
+        std::fs::create_dir_all(&codex_home).expect("create codex-home");
+        let child = std::process::Command::new(bin)
+            .env("CODEXFERRY_CONFIG", &config_path)
+            .env("CODEX_HOME", &codex_home)
+            .stdout(Stdio::null())
+            .stderr(stderr)
+            .spawn()
+            .expect("spawn codexferry");
+        let guard = RouterGuard {
+            child,
+            stderr_path,
+            _dir: dir,
+        };
+        let router_url = format!("http://127.0.0.1:{port}");
+        match wait_for_healthz(&router_url, &guard).await {
+            Ok(()) => {
+                started = Some((guard, router_url, config_path, port));
+                break;
+            }
+            Err(log) => {
+                drop(guard);
+                if attempt == 1 {
+                    panic!("router did not become healthy within 10s; stderr:\n{log}");
+                }
+            }
+        }
+    }
+    let (_guard, router_url, config_path, port) =
+        started.expect("retry loop always returns or panics");
+    let client = reqwest::Client::new();
+
+    // Baseline: the description carries the wire format + the v1 text.
+    let body1 = client
+        .get(format!("{router_url}/v1/models?client_version=0.0.0"))
+        .send()
+        .await
+        .expect("baseline models get")
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        body1.contains("CodexFerry chat to ds/a - v1"),
+        "baseline description must name format + route + custom text: {body1}"
+    );
+
+    // Description-ONLY edit: same route key, same context window.
+    editor_save(&config_path, &base_config("v2", port));
+
+    // Poll until the served description flips to v2 (E2 regression: with
+    // the fingerprint omitting description this never happened).
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let body = client
+            .get(format!("{router_url}/v1/models?client_version=0.0.0"))
+            .send()
+            .await
+            .expect("poll models get")
+            .text()
+            .await
+            .unwrap();
+        if body.contains("CodexFerry chat to ds/a - v2") {
+            assert!(
+                !body.contains("- v1"),
+                "stale v1 description must not linger: {body}"
+            );
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "description-only edit did not propagate within 10s; last body:\n{body}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test]
+/// Review E5: `ttl_hours = 0` expires every session between save and the
+/// next turn — the store silently degrades to always-miss. validate() must
+/// say so loudly at startup (the warn lands on the daemon's STDOUT before
+/// the listener binds — tracing_subscriber::fmt writes to stdout, NOT
+/// stderr).
+async fn ttl_zero_warns_at_startup() {
+    let port = free_port();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config_path = dir.path().join("config.toml");
+    let log_path = dir.path().join("router.stdout.log");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+[server]
+host = "127.0.0.1"
+port = {port}
+
+[session]
+ttl_hours = 0
+
+[providers.ds]
+base_url = "http://x"
+api_key = "k"
+format = "chat"
+
+[routes]
+"ds/a" = {{ model = "m" }}
+"#
+        ),
+    )
+    .expect("write config");
+    let log = std::fs::File::create(&log_path).expect("create stdout log");
+    let child = std::process::Command::new(env!("CARGO_BIN_EXE_codexferry"))
+        .env("CODEXFERRY_CONFIG", &config_path)
+        .env("CODEX_HOME", dir.path().join("codex-home"))
+        .stdout(log)
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn codexferry");
+    let guard = RouterGuard {
+        child,
+        stderr_path: log_path,
+        _dir: dir,
+    };
+    let router_url = format!("http://127.0.0.1:{port}");
+    wait_for_healthz(&router_url, &guard)
+        .await
+        .expect("router must start despite the zero TTL");
+
+    let log = std::fs::read_to_string(&guard.stderr_path).expect("read stdout log");
+    assert!(
+        log.contains("the session store is effectively disabled"),
+        "ttl_hours = 0 must warn at startup; daemon log:\n{log}"
+    );
 }
 
 #[tokio::test]

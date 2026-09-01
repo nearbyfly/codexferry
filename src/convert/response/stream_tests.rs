@@ -1123,3 +1123,40 @@ fn total_tokens_u64_sum_does_not_overflow() {
     let resp = build_completed_response("resp_big", "m", &[], Some(&usage));
     assert_eq!(resp["usage"]["total_tokens"], 5_000_000_000u64);
 }
+
+/// Review E4 (streaming site): the `response.completed` usage total must be
+/// a u64 sum — two individually valid u32 upstream counts must not overflow
+/// (debug panic / release wrap) on the streaming emit path either.
+#[test]
+fn streaming_total_tokens_u64_sum_does_not_overflow() {
+    let mut conv = StreamConverter::new(
+        "resp_big_stream".into(),
+        "m".into(),
+        HealGates::default(),
+        NamespaceToolMap::new(),
+    );
+    conv.on_chunk(&make_chunk(Some("hi"), Some("stop")));
+    conv.acc.usage = Some(ChatUsage {
+        prompt_tokens: 3_000_000_000,
+        completion_tokens: 2_000_000_000,
+        ..Default::default()
+    });
+    let ef = conv.finish();
+    let (_, data) = ef
+        .iter()
+        .find(|(t, _)| t == "response.completed")
+        .expect("finish must emit response.completed");
+    let completed: Value = serde_json::from_str(data).unwrap();
+    assert_eq!(
+        completed["response"]["usage"]["input_tokens"],
+        3_000_000_000u64
+    );
+    assert_eq!(
+        completed["response"]["usage"]["output_tokens"],
+        2_000_000_000u64
+    );
+    assert_eq!(
+        completed["response"]["usage"]["total_tokens"],
+        5_000_000_000u64
+    );
+}

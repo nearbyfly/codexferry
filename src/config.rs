@@ -1171,6 +1171,56 @@ format = "xml"
         assert_eq!(cfg.session.max_memory_mb, 512);
     }
 
+    /// Reload-staleness spec §Design A: the ReloadHook must fire after each
+    /// APPLIED config change — it is what kicks the catalog cache's
+    /// proactive refresh. Contract: fire-and-forget (the applier must never
+    /// block on or be broken by hook work).
+    #[tokio::test]
+    async fn reload_hook_fires_after_applied_change() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cxf.toml");
+        let config_a = r#"
+[providers.x]
+base_url = "https://x.com/v1"
+api_key = "old-key"
+format = "chat"
+[routes]
+"x/flash" = { model = "m" }
+"#;
+        let config_b = r#"
+[providers.x]
+base_url = "https://x.com/v1"
+api_key = "new-key"
+format = "chat"
+[routes]
+"x/flash" = { model = "m" }
+"#;
+        std::fs::write(&path, config_a).unwrap();
+        let shared: SharedConfig = Arc::new(RwLock::new(make_config(config_a)));
+        static HOOK_CALLS: AtomicUsize = AtomicUsize::new(0);
+        let hook: ReloadHook = Arc::new(|| {
+            HOOK_CALLS.fetch_add(1, Ordering::SeqCst);
+        });
+        let _watcher = spawn_watcher(&path, shared.clone(), Some(hook)).unwrap();
+
+        std::fs::write(&path, config_b).unwrap();
+        // Poll until BOTH the config landed and the hook fired — the applier
+        // orders the hook strictly after the write.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let applied = shared.read().await.providers["x"].api_key.as_deref() == Some("new-key");
+            if applied && HOOK_CALLS.load(Ordering::SeqCst) >= 1 {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "hook did not fire after an applied reload"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
     /// A config change must be applied even when a request holds the read
     /// lock at the moment the notify event fires. The channel-based applier
     /// must queue the update and apply it once the lock is released - this
