@@ -576,7 +576,8 @@ cargo install cargo-llvm-cov --locked
 ```
 
 `scripts/coverage.sh` wraps the three layers — each writes an HTML report
-under `coverage/<mode>/` (gitignored):
+under `coverage/<mode>/html/` (gitignored; cargo-llvm-cov appends the
+`html/` subdir itself):
 
 ```bash
 scripts/coverage.sh unit         # unit tests (inside the bin crate)
