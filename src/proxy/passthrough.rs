@@ -3,9 +3,7 @@
 //! Extracted from  (module-split spec Phase 2).
 
 use super::capture::{completed_capture, last_completed_payload, trim_completed_prefix};
-use super::upstream::{
-    body_read_failure, record_upstream_failure, send_upstream, upstream_non_2xx,
-};
+use super::upstream::{read_body_capped, record_upstream_failure, send_upstream, upstream_non_2xx};
 use super::*;
 
 /// Forward a request to a native Responses upstream verbatim (no protocol
@@ -453,23 +451,21 @@ pub(super) async fn handle_responses_format(
             .insert("content-type", "text/event-stream".parse().unwrap());
         (resp, 0, 0)
     } else {
-        // Non-streaming passthrough: read the full upstream JSON body and
-        // forward it (healed in place when a healing quirk is on).
-        let body = match upstream_resp.bytes().await {
+        // Non-streaming passthrough: read the full upstream JSON body
+        // (capped — see `read_body_capped`) and forward it (healed in place
+        // when a healing quirk is on).
+        let body = match read_body_capped(
+            upstream_resp,
+            super::MAX_TRANSFER_BYTES,
+            &state.metrics,
+            &route.provider_name,
+            &req.model,
+            &route.model,
+        )
+        .await
+        {
             Ok(b) => b,
-            Err(e) => {
-                return (
-                    body_read_failure(
-                        &e,
-                        &state.metrics,
-                        &route.provider_name,
-                        &req.model,
-                        &route.model,
-                    ),
-                    0,
-                    0,
-                );
-            }
+            Err(resp) => return (resp, 0, 0),
         };
 
         // Response-side healing (quirks dsml_heal + think_tags): rewrite

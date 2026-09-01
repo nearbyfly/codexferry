@@ -549,6 +549,17 @@ impl Config {
             tracing::warn!("[quirks] disabled: unknown quirk name `{name}`");
         }
 
+        // ttl_hours = 0 makes the sliding TTL expire every session in the
+        // gap between save and the next turn's get — the store silently
+        // degrades to always-miss (review E5). max_sessions/max_memory_mb
+        // of 0 are documented as "caching off"; a zero TTL is almost
+        // certainly a mistake, so say so loudly.
+        if self.session.ttl_hours == 0 {
+            tracing::warn!(
+                "[session] ttl_hours = 0: every saved session expires immediately,                  the session store is effectively disabled (previous_response_id will always miss)"
+            );
+        }
+
         Ok(ValidatedConfig {
             server: self.server,
             providers: self.providers,

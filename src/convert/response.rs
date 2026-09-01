@@ -244,7 +244,7 @@ pub fn build_completed_response(
         "usage": {
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
-            "total_tokens": input_tokens + output_tokens
+            "total_tokens": u64::from(input_tokens) + u64::from(output_tokens)
         }
     })
 }
@@ -716,15 +716,20 @@ impl StreamConverter {
         }
 
         // Tool-call items: added → delta → done, in ascending index order.
-        // Entries with neither a name nor accumulated arguments are dropped:
-        // an id-only delta (name missing) carries no call the client could
-        // execute, so emitting it would only produce a bogus function_call
-        // with name "" / arguments "{}" (which then replays as a tool_call
-        // for an unnamed function).
+        // Entries without a NAME at stream end are dropped. The id-only
+        // variant (no name, no arguments) carries no call the client could
+        // execute; the args-only variant (arguments streamed but no name
+        // fragment ever arrived — a broken or partial upstream) is equally
+        // unusable: emitting it would produce a function_call with name ""
+        // which replays as a tool_call for an unnamed function that strict
+        // Chat upstreams reject for the rest of the session (review E3,
+        // same failure family as the empty-call_id case in AGENTS.md §8b).
+        // Because ALL emission happens here at stream end, dropping the
+        // entry means the client never sees any of its events.
         let live_tool_calls: Vec<(&usize, &(String, String, String))> = self
             .tool_calls
             .iter()
-            .filter(|(_, (_, name, args))| !name.is_empty() || !args.trim().is_empty())
+            .filter(|(_, (_, name, _))| !name.is_empty())
             .collect();
         let base_index = self.next_output_index;
         for (rel_idx, (_, (id, name, args))) in live_tool_calls.into_iter().enumerate() {
@@ -827,7 +832,7 @@ impl StreamConverter {
                     "usage": {
                         "input_tokens": input_tokens,
                         "output_tokens": output_tokens,
-                        "total_tokens": input_tokens + output_tokens
+                        "total_tokens": u64::from(input_tokens) + u64::from(output_tokens)
                     }
                 }
             }),

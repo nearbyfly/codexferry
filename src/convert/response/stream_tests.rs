@@ -1044,3 +1044,82 @@ fn finish_flushes_think_tail_before_done_events() {
     assert_eq!(conv.acc.reasoning, "cut off</th");
     assert_eq!(conv.acc.text, "");
 }
+
+/// Review E3: a tool-call accumulator entry whose name never arrived
+/// (arguments-only — a broken/partial upstream) must be dropped at finish,
+/// not emitted as a `name: ""` function_call, which would replay as an
+/// unnamed tool_call that strict Chat upstreams reject for the rest of the
+/// session. A name-only entry (no arguments) is still a real call and must
+/// be emitted with `arguments: "{}"`.
+#[test]
+fn args_only_tool_call_dropped_name_only_kept() {
+    let mut conv = StreamConverter::new(
+        "resp_anon".into(),
+        "m".into(),
+        HealGates::default(),
+        NamespaceToolMap::new(),
+    );
+
+    // Index 0: arguments stream in, but NO name fragment ever does.
+    let mut chunk1 = make_chunk(None, None);
+    chunk1.choices[0].delta.tool_calls = Some(vec![DeltaToolCall {
+        index: 0,
+        id: Some("call_anon".into()),
+        function: Some(DeltaFunction {
+            name: None,
+            arguments: Some("{\"a\":1}".into()),
+        }),
+    }]);
+    conv.on_chunk(&chunk1);
+
+    // Index 1: a name arrives with no arguments — a zero-argument call.
+    let mut chunk2 = make_chunk(None, None);
+    chunk2.choices[0].delta.tool_calls = Some(vec![DeltaToolCall {
+        index: 1,
+        id: Some("call_noargs".into()),
+        function: Some(DeltaFunction {
+            name: Some("ping".into()),
+            arguments: None,
+        }),
+    }]);
+    conv.on_chunk(&chunk2);
+
+    // finish() only emits after a finish_reason chunk was seen (AGENTS.md #8).
+    conv.on_chunk(&make_chunk(None, Some("tool_calls")));
+    let ef = conv.finish();
+
+    let added_events: Vec<&(String, String)> = ef
+        .iter()
+        .filter(|(t, _)| t == "response.output_item.added")
+        .collect();
+    assert_eq!(
+        added_events.len(),
+        1,
+        "only the named call may be emitted: {ef:?}"
+    );
+    let added: Value = serde_json::from_str(&added_events[0].1).unwrap();
+    assert_eq!(added["item"]["name"], "ping");
+
+    // No `name: ""` anywhere on the wire, and nothing anonymous persisted
+    // into the session items.
+    assert!(!ef.iter().any(|(_, d)| d.contains("\"name\":\"\"")));
+    assert!(conv
+        .acc
+        .items
+        .iter()
+        .all(|i| { i.get("name").and_then(Value::as_str) != Some("") }));
+}
+
+/// Review E4: total_tokens must be computed as u64 — two individually
+/// valid u32 token counts summing past u32::MAX used to overflow (panic in
+/// debug builds, silent wrap in release).
+#[test]
+fn total_tokens_u64_sum_does_not_overflow() {
+    let usage = ChatUsage {
+        prompt_tokens: 3_000_000_000,
+        completion_tokens: 2_000_000_000,
+        ..Default::default()
+    };
+    let resp = build_completed_response("resp_big", "m", &[], Some(&usage));
+    assert_eq!(resp["usage"]["total_tokens"], 5_000_000_000u64);
+}

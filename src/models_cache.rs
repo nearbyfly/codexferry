@@ -263,8 +263,11 @@ impl Default for CatalogCache {
 /// Hash the routes in sorted key order into a fingerprint.
 ///
 /// Only the fields that affect the served catalog body are fed in: key,
-/// context window, default reasoning effort (empty string when unset), and
-/// the `hide_bundled_models` flag.
+/// context window, default reasoning effort (empty string when unset), the
+/// route description (folded into the entry's `description` by
+/// `set_catalog_fields` — omitted it once and a description-only edit kept
+/// serving the stale catalog forever, review E2), and the
+/// `hide_bundled_models` flag.
 fn fingerprint_config(config: &ValidatedConfig) -> u64 {
     let mut h = DefaultHasher::new();
     // The hide flag changes the served body; hashing it (re)builds the
@@ -278,6 +281,8 @@ fn fingerprint_config(config: &ValidatedConfig) -> u64 {
         h.write(&route.context_window.to_be_bytes());
         let effort = route.default_reasoning_effort.as_deref().unwrap_or("");
         h.write(effort.as_bytes());
+        let description = route.description.as_deref().unwrap_or("");
+        h.write(description.as_bytes());
     }
     h.finish()
 }
@@ -309,6 +314,41 @@ mod tests {
         std::fs::write(&path, toml).unwrap();
         let raw = Config::parse_file(&path).unwrap();
         raw.validate().unwrap()
+    }
+
+    /// Review E2: a description-only route edit must change the
+    /// fingerprint. `set_catalog_fields` folds the description into the
+    /// served entry, so omitting it from the hash kept fast_hit serving the
+    /// stale catalog forever on the common config (file-backed template +
+    /// hide off).
+    #[test]
+    fn fingerprint_distinguishes_route_description() {
+        let toml_plain = r#"
+[server]
+hide_bundled_models = false
+[providers.ds]
+base_url = "http://x"
+api_key = "k"
+format = "chat"
+[routes."ds/a"]
+model = "m"
+context_window = 1000
+"#;
+        let toml_desc = r#"
+[server]
+hide_bundled_models = false
+[providers.ds]
+base_url = "http://x"
+api_key = "k"
+format = "chat"
+[routes."ds/a"]
+model = "m"
+context_window = 1000
+description = "fast tier"
+"#;
+        let plain = fingerprint_config(&parse_config_toml(toml_plain));
+        let described = fingerprint_config(&parse_config_toml(toml_desc));
+        assert_ne!(plain, described, "description-only edit must invalidate");
     }
 
     fn config_with_route(key: &str) -> ValidatedConfig {

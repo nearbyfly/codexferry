@@ -53,7 +53,7 @@ mod upstream;
 use chat::handle_chat_format;
 
 use axum::{
-    extract::{Query, State},
+    extract::{DefaultBodyLimit, Query, State},
     http::{HeaderMap, StatusCode},
     response::{sse::Event, sse::Sse, IntoResponse, Response},
     routing::{get, post},
@@ -616,6 +616,20 @@ async fn handle_fallback() -> Response {
     error_response(StatusCode::NOT_FOUND, "not_found", "unknown endpoint")
 }
 
+/// Cap on transfer sizes in either direction, in bytes (64 MiB).
+///
+/// Two distinct limits share this value because they fail for the same
+/// reason — a request/response that large is not a real LLM turn:
+/// - **Request**: axum's default body limit is 2 MiB, and codex sends
+///   `store: false` while replaying its full transcript inline every turn
+///   (AGENTS.md §6) — long sessions with large tool outputs cross 2 MiB
+///   and would be rejected with a bare 413 (review E1). Raised so a full
+///   session replay is never refused.
+/// - **Response**: non-streaming upstream bodies are read through
+///   `read_body_capped` with the same cap (review E6), so a broken
+///   upstream cannot push unbounded bytes into memory within its timeout.
+pub(crate) const MAX_TRANSFER_BYTES: usize = 64 * 1024 * 1024;
+
 /// Build the axum Router with all routes and shared state.
 ///
 /// Extracted from [`serve`] so tests can build a router against synthetic
@@ -629,6 +643,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/healthz", get(handle_healthz))
         .route("/metrics", get(handle_metrics))
         .fallback(handle_fallback)
+        .layer(DefaultBodyLimit::max(MAX_TRANSFER_BYTES))
         .with_state(state)
 }
 
