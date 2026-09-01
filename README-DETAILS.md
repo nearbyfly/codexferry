@@ -108,9 +108,25 @@ drop_params  = ["reasoning_effort"]   # upstream rejects unknown fields
 extra_params = { top_k = 50 }         # fixed body additions
 ```
 
-Provider quirks — the GLM thinking switch, missing-`[DONE]` tolerance, and
-automatic healing of leaked DSML tool-call / `<think>` thinking markup on
-chat-route responses — are on by default and can be disabled per quirk:
+Provider quirks are on by default and can be disabled per quirk. The full
+list of registered quirks:
+
+- `glm_thinking` — adds `thinking: {"type":"enabled"}` for GLM/Zhipu models
+  (they suppress auto-thinking under heavy agent system prompts).
+- `missing_done` — treats a stream that ends without `[DONE]` but with a
+  `finish_reason` as complete, not failed.
+- `dsml_heal` — repairs leaked DeepSeek DSML tool-call markers in chat
+  replies (both streaming and one-shot paths restore leaked markers to
+  structured `tool_calls` and strip them from visible text).
+- `think_tags` — splits leaked `<think>…</think>` markers into the
+  reasoning channel instead of rendering them as body text.
+- `merge_fragmented` (responses-format path only) — collapses upstream
+  Responses SSE runs of same-type `output_item.added` events (observed on
+  MiniMax M3, 5–14 fragments per item) into a single Responses-conformant
+  item. All deltas are rewritten to the first fragment's `item_id` /
+  `output_index`; a synthesized `content_part.done` + `output_item.done`
+  closes the run. Self-deactivates on healthy streams (run length = 1).
+  Health-check passthrough is otherwise verbatim.
 
 ```toml
 [quirks]

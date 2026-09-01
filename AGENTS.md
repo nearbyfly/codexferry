@@ -282,7 +282,7 @@ Codex CLI ──POST /v1/responses──▶ axum daemon (127.0.0.1:8787)
 | `logging.rs` | tracing-subscriber init |
 | `metrics.rs` | `Metrics`: Prometheus registry + `/metrics` encoding (upstream requests, tokens, latency, in-flight) |
 | `normalize.rs` | boundary normalization: additional_tools hoist, chat namespace flattening + encode/decode map, unknown-type visibility + counters |
-| `heal/` | DSML/think response healing: `mod.rs` (HealGates + facade), `think.rs`, `dsml.rs`, `responses.rs` |
+| `heal/` | DSML/think response healing: `mod.rs` (HealGates + facade), `think.rs`, `dsml.rs`, `merge.rs` (FragmentedItemMerger — `merge_fragmented` heal pass for MiniMax M3 Responses SSE fragmentation), `responses.rs` |
 | `wire/responses.rs` | Responses API serde types (inbound from Codex) |
 | `wire/chat.rs` | Chat Completions serde types (outbound to upstream) |
 | `convert/request.rs` | Responses → Chat request conversion (incl. namespace encode on history replay) |
@@ -292,7 +292,7 @@ Codex CLI ──POST /v1/responses──▶ axum daemon (127.0.0.1:8787)
 
 - **Unit tests**: inline `#[cfg(test)] mod tests` in smaller modules; the
   proxy/heal/convert/normalize suites live in sibling files (`src/proxy/tests.rs`,
-  `src/proxy/capture/tests.rs`, `src/heal/{think,dsml,responses_healer}_tests.rs`,
+  `src/proxy/capture/tests.rs`, `src/heal/{think,dsml,merge,responses_healer}_tests.rs`,
   `src/convert/*/tests.rs`, `src/normalize/tests.rs`).
 - **Integration tests** use the shared harness in `tests/common/mod.rs` plus five
   topical binaries (`chat_conversion.rs`, `passthrough.rs`, `healing.rs`,
