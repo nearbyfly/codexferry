@@ -83,6 +83,12 @@ zero across the whole suite).
 
 Three subcommands + a combined mode, wrapping cargo-llvm-cov:
 
+> Descope note (2026-09-01, SDD final review): the "combined mode" is
+> deferred until a workflow consumes it — same spirit as Q4's deferral of
+> CI-facing formats. Per-layer reports remain the actionable views; adding a
+> merged view later is additive (share one profraw dir across flows, then
+> `cargo llvm-cov report`).
+
 - `coverage.sh unit` — `cargo llvm-cov --bin codexferry --html
   --output-dir coverage/unit` (unit tests live inside the bin crate).
 - `coverage.sh integration` — `cargo llvm-cov --test chat_conversion --test
